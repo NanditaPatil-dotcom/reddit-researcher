@@ -99,6 +99,101 @@ function containsKeywords(text, keywords) {
   return keywords.filter(k => lower.includes(k));
 }
 
+function decodeEntities(text = "") {
+  return text
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ");
+}
+
+function cleanText(text = "") {
+  return decodeEntities(String(text))
+    .replace(/\r/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function redditJsonUrl(postUrl) {
+  const clean = postUrl.split("?")[0].replace(/\/$/, "");
+  return `${clean}.json?sort=top&limit=50`;
+}
+
+async function fetchJson(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "accept": "application/json",
+        "user-agent": "reddit-researcher/0.1 (+local research script)",
+      },
+      signal: controller.signal,
+    });
+
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function redditSearch(subreddit, query, timeRange, limit = 10) {
+  const url = new URL(`https://www.reddit.com/r/${subreddit}/search.json`);
+  url.searchParams.set("q", query);
+  url.searchParams.set("restrict_sr", "1");
+  url.searchParams.set("sort", "top");
+  url.searchParams.set("t", timeRange);
+  url.searchParams.set("limit", String(limit));
+
+  const data = await fetchJson(url.toString());
+  const children = data?.data?.children;
+  if (!Array.isArray(children)) return [];
+
+  return children
+    .filter(c => c.kind === "t3" && c.data?.permalink)
+    .map(c => ({
+      url: `https://www.reddit.com${c.data.permalink}`,
+      title: c.data.title || "",
+      subreddit,
+      publishedDate: c.data.created_utc ? new Date(c.data.created_utc * 1000).toISOString() : null,
+    }));
+}
+
+function extractCommentThings(children = [], out = []) {
+  for (const child of children) {
+    if (!child || child.kind !== "t1" || !child.data) continue;
+
+    const text = cleanText(child.data.body || "");
+    if (text && !["[deleted]", "[removed]"].includes(text.toLowerCase())) {
+      const painKeywords = containsKeywords(text, PAIN_POINT_KEYWORDS);
+      const oppKeywords = containsKeywords(text, OPPORTUNITY_KEYWORDS);
+
+      out.push({
+        text: text.slice(0, 1000),
+        upvotes: Number(child.data.ups || 0),
+        author: child.data.author || "",
+        painKeywords,
+        oppKeywords,
+        isHighSignal: painKeywords.length + oppKeywords.length >= 2,
+      });
+    }
+
+    const replies = child.data.replies;
+    if (replies && replies.data && Array.isArray(replies.data.children)) {
+      extractCommentThings(replies.data.children, out);
+    }
+  }
+
+  return out;
+}
+
 function scorePost(title, body, commentCount, upvotes) {
   const text = `${title} ${body}`.toLowerCase();
   const painMatches = containsKeywords(text, PAIN_POINT_KEYWORDS).length;
@@ -149,35 +244,55 @@ async function discoverSubreddits(topic) {
 
 // ── Step 2: Post Discovery ───────────────────────────────────────────
 
-function discoverPosts(subreddits, topic) {
+async function discoverPosts(subreddits, topic) {
   console.log(`\n[2/6] Discovering posts across ${subreddits.length} subreddits...`);
 
   const allPosts = [];
   const seen = new Set();
 
+  function addPost(post) {
+    const clean = post.url.split("?")[0];
+    if (seen.has(clean)) return;
+
+    seen.add(clean);
+    allPosts.push({ ...post, url: clean });
+  }
+
   for (const sub of subreddits) {
     console.log(`  Searching r/${sub}...`);
 
-    // Search within subreddit
+    const directResults = await redditSearch(sub, topic, TIME, 15);
+    for (const r of directResults) addPost(r);
+
+    // Search within subreddit.
     for (const modifier of DEFAULT_SEARCH_MODIFIERS.slice(0, 4)) {
-      const query = `${topic} ${modifier} site:reddit.com/r/${sub}`;
-      const results = bbSearch(query, 8);
+      const redditResults = await redditSearch(sub, `${topic} ${modifier}`, TIME, 8);
+      for (const r of redditResults) addPost(r);
+    }
 
-      for (const r of results) {
-        if (!r.url.includes("reddit.com/r/") || seen.has(r.url)) continue;
-        if (!r.url.includes("/comments/")) continue; // only actual posts
+    // Browserbase search is useful, but noisy when local credentials are absent.
+    // Prefer Reddit JSON and only fall back if we still need more candidates.
+    if (allPosts.length < LIMIT) {
+      for (const modifier of DEFAULT_SEARCH_MODIFIERS.slice(0, 4)) {
+        const query = `${topic} ${modifier} site:reddit.com/r/${sub}`;
+        const results = bbSearch(query, 8);
 
-        seen.add(r.url);
-        allPosts.push({
-          url: r.url,
-          title: r.title || "",
-          subreddit: sub,
-          publishedDate: r.publishedDate || null,
-        });
+        for (const r of results) {
+          if (!r.url.includes("reddit.com/r/")) continue;
+          if (!r.url.includes("/comments/")) continue; // only actual posts
+
+          addPost({
+            url: r.url,
+            title: r.title || "",
+            subreddit: sub,
+            publishedDate: r.publishedDate || null,
+          });
+        }
       }
     }
 
-    // Also search for top posts directly
+    if (allPosts.length >= LIMIT) continue;
+
     try {
       browse("env", "local");
       browse("open", `https://www.reddit.com/r/${sub}/search/?q=${encodeURIComponent(topic)}&sort=top&t=${TIME}`);
@@ -188,11 +303,7 @@ function discoverPosts(subreddits, topic) {
       // Extract post links from snapshot
       const postLinks = snapshot.match(/https:\/\/www\.reddit\.com\/r\/[^/]+\/comments\/[^\s"')]+/g) || [];
       for (const link of postLinks) {
-        const clean = link.split("?")[0];
-        if (!seen.has(clean)) {
-          seen.add(clean);
-          allPosts.push({ url: clean, title: "", subreddit: sub, publishedDate: null });
-        }
+        addPost({ url: link, title: "", subreddit: sub, publishedDate: null });
       }
     } catch {
       // browser might not be available — that's ok
@@ -205,7 +316,36 @@ function discoverPosts(subreddits, topic) {
 
 // ── Step 3: Content Extraction ───────────────────────────────────────
 
-function extractPost(postUrl) {
+async function extractPostFromJson(postUrl) {
+  const data = await fetchJson(redditJsonUrl(postUrl));
+  if (!Array.isArray(data) || !data[0]?.data?.children?.[0]?.data) return null;
+
+  const postData = data[0].data.children[0].data;
+  const title = cleanText(postData.title || "");
+  const body = cleanText(postData.selftext || "");
+  const upvotes = Number(postData.ups || postData.score || 0);
+  const commentCount = Number(postData.num_comments || 0);
+  const comments = extractCommentThings(data[1]?.data?.children || [])
+    .sort((a, b) => b.upvotes - a.upvotes)
+    .slice(0, 50);
+
+  const flaggedComments = comments.filter(c => c.painKeywords.length > 0 || c.oppKeywords.length > 0);
+  const score = scorePost(title, body, commentCount, upvotes);
+
+  return {
+    url: postUrl,
+    title,
+    body,
+    upvotes,
+    commentCount,
+    comments,
+    flaggedComments,
+    score,
+    highSignalComments: comments.filter(c => c.isHighSignal),
+  };
+}
+
+function extractPostFromBrowser(postUrl) {
   try {
     browse("open", postUrl);
     browse("wait", "load");
@@ -234,7 +374,7 @@ function extractPost(postUrl) {
     const bodyLines = lines.slice(bodyStart, bodyStart + 10).join(" ");
     const body = bodyLines.slice(0, 600);
 
-    // Extract comments — look for high-signal ones
+    // Extract comments — browser output is noisy, so keep only lines with signal.
     const comments = [];
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -264,6 +404,7 @@ function extractPost(postUrl) {
       upvotes,
       commentCount,
       comments,
+      flaggedComments: comments,
       score,
       highSignalComments: comments.filter(c => c.isHighSignal),
     };
@@ -271,6 +412,10 @@ function extractPost(postUrl) {
     console.error(`  Failed to extract ${postUrl}: ${err.message}`);
     return null;
   }
+}
+
+async function extractPost(postUrl) {
+  return await extractPostFromJson(postUrl) || extractPostFromBrowser(postUrl);
 }
 
 // ── Step 4: Theme Detection ──────────────────────────────────────────
@@ -305,11 +450,17 @@ function detectThemes(posts) {
     for (const [theme, keywords] of Object.entries(themeKeywords)) {
       const matches = keywords.filter(k => allText.includes(k));
       if (matches.length > 0) {
+        const matchingComments = post.comments.filter(c => {
+          const text = c.text.toLowerCase();
+          return keywords.some(k => text.includes(k));
+        });
+
         themes[theme].push({
           url: post.url,
           title: post.title,
           matchedKeywords: matches,
           highSignalComments: post.highSignalComments,
+          matchingComments,
           score: post.score,
         });
       }
@@ -344,8 +495,11 @@ ${post.highSignalComments.map(c => `
 **Opportunity keywords**: ${c.oppKeywords.join(", ") || "none"}
 `).join("\n")}
 
-## All Flagged Comments (${post.comments.length})
-${post.comments.map(c => `- ${c.text.slice(0, 200)}`).join("\n")}
+## All Flagged Comments (${post.flaggedComments.length})
+${post.flaggedComments.map(c => `- ${c.text.slice(0, 300)}`).join("\n")}
+
+## Top Comments Extracted (${post.comments.length})
+${post.comments.slice(0, 15).map(c => `- (${c.upvotes} upvotes) ${c.text.slice(0, 300)}`).join("\n")}
 `;
 
   writeFileSync(filePath, content);
@@ -375,7 +529,7 @@ ${posts.sort((a, b) => b.score - a.score).map(p => `
 - **Matched**: ${p.matchedKeywords.join(", ")}
 - **High signal comments**: ${(p.highSignalComments || []).length}
 
-${(p.highSignalComments || []).slice(0, 3).map(c => `> "${c.text.slice(0, 300)}"`).join("\n\n")}
+${((p.matchingComments || []).length > 0 ? p.matchingComments : (p.highSignalComments || [])).slice(0, 3).map(c => `> "${c.text.slice(0, 300)}"`).join("\n\n")}
 `).join("\n---\n")}
 `;
     writeFileSync(filePath, content);
@@ -383,12 +537,20 @@ ${(p.highSignalComments || []).slice(0, 3).map(c => `> "${c.text.slice(0, 300)}"
 }
 
 function writeIndexJson(posts, themes, subreddits, outputDir) {
+  const topPainPoints = [
+    ...new Map(
+      themes.PRICING.concat(themes.MISSING_FEATURE)
+        .sort((a, b) => b.score - a.score)
+        .map(p => [p.url, { title: p.title, url: p.url }])
+    ).values()
+  ].slice(0, 10);
+
   const index = {
     topic: TOPIC,
     subreddits,
     totalPosts: posts.filter(Boolean).length,
     totalComments: posts.filter(Boolean).reduce((sum, p) => sum + p.commentCount, 0),
-    totalFlaggedComments: posts.filter(Boolean).reduce((sum, p) => sum + p.comments.length, 0),
+    totalFlaggedComments: posts.filter(Boolean).reduce((sum, p) => sum + (p.flaggedComments || []).length, 0),
     themeBreakdown: Object.fromEntries(
       Object.entries(themes).map(([k, v]) => [k, v.length])
     ),
@@ -397,10 +559,7 @@ function writeIndexJson(posts, themes, subreddits, outputDir) {
       url: p.url,
       score: p.score,
     })),
-    topPainPoints: themes.PRICING.concat(themes.MISSING_FEATURE)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 10)
-      .map(p => ({ title: p.title, url: p.url })),
+    topPainPoints,
     generatedAt: new Date().toISOString(),
   };
 
@@ -426,7 +585,7 @@ async function main() {
   writeFileSync(join(OUTPUT_DIR, "subreddits.txt"), subreddits.join("\n"));
 
   // Step 2: Discover posts
-  const postList = discoverPosts(subreddits, TOPIC);
+  const postList = await discoverPosts(subreddits, TOPIC);
   console.log(`\n[3/6] Extracting content from ${postList.length} posts...`);
 
   // Step 3: Extract each post
@@ -434,7 +593,7 @@ async function main() {
   for (let i = 0; i < postList.length; i++) {
     const p = postList[i];
     console.log(`  [${i + 1}/${postList.length}] ${p.url.slice(0, 70)}...`);
-    const extracted = extractPost(p.url);
+    const extracted = await extractPost(p.url);
     if (extracted) {
       extracted.subreddit = p.subreddit;
       writePostFile(extracted, OUTPUT_DIR);
