@@ -292,13 +292,11 @@ function renderHtml({ index, posts, themes, topic, generatedAt }) {
   const opportunityItems = topOpportunities.map(item => `<li>${externalLink(item.url, item.title)}${item.score ? `<span>${escapeHtml(Number(item.score).toFixed(1))}</span>` : ""}</li>`).join("");
   const painItems = topPainPoints.map(item => `<li>${externalLink(item.url, item.title)}</li>`).join("");
 
-  // Skill panel items
+  // Skill card item definitions
   const churnItems = (index.churnSignals || []).slice(0, 5).map(c => 
     `<li>${externalLink(c.postUrl, c.postTitle || "Post")}<div class="muted">${escapeHtml(c.excerpt || "")}</div></li>`).join("");
   const competitorItems = (index.competitors || []).slice(0, 5).map(c =>
     `<li>${c.direction === "FROM" ? "← " : "→ "} <strong>${escapeHtml(c.name)}</strong> <span class="muted">(${c.count})</span></li>`).join("");
-  const personaItems = Object.entries(index.personas || {}).sort((a, b) => b[1].count - a[1].count).slice(0, 5).map(([k, v]) =>
-    `<li>${escapeHtml(k)} <span class="muted">${v.count} mentions</span></li>`).join("");
   const sentimentItems = Object.entries(index.sentiment || {}).sort((a, b) => (Array.isArray(b[1]) ? b[1].length : Number(b[1]) || 0) - (Array.isArray(a[1]) ? a[1].length : Number(a[1]) || 0)).slice(0, 5).map(([k, v]) =>
     `<li>${escapeHtml(k)} <span class="muted">${Array.isArray(v) ? v.length + ' quotes' : (typeof v === 'number' ? v + ' quotes' : (v.count || 0) + ' quotes')}</span></li>`).join("");
   const evidenceItems = (index.evidenceQuality || []).slice(0, 5).map(e =>
@@ -313,6 +311,42 @@ function renderHtml({ index, posts, themes, topic, generatedAt }) {
     `<li>${escapeHtml(a.title)}</li>`).join("");
   const founderActionItems = (index.founder?.actionItems || []).slice(0, 3).map(a =>
     `<li><strong>${escapeHtml(a.priority)}:</strong> ${escapeHtml(a.action)}</li>`).join("");
+
+  // Skill cards for theme grid
+  const personaEntries = Object.entries(index.personas || {}).sort((a, b) => b[1].count - a[1].count).slice(0, 5);
+  const maxPersonaCount = Math.max(1, ...personaEntries.map(item => item[1].count));
+  const skillCards = [
+    ...personaEntries.map(([k, v]) =>
+      `<article class="theme-card">
+        <div class="theme-head"><div><h2>${escapeHtml(k)}</h2><p>${v.count} mentions</p></div></div>
+        <div class="bar"><span style="width:${Math.min(100, (v.count / maxPersonaCount) * 100)}%"></span></div>
+      </article>`),
+    (index.churnSignals || []).length > 0 && `<article class="theme-card">
+      <div class="theme-head"><div><h2>Churn Signals</h2><p>${churnItems.split('</li>').length - 1} items</p></div></div>
+      <div class="mentions">${churnItems}</div>
+    </article>`,
+    (index.competitors || []).length > 0 && `<article class="theme-card">
+      <div class="theme-head"><div><h2>Competitor Switches</h2><p>${competitorItems.split('</li>').length - 1} patterns</p></div></div>
+      <div class="mentions">${competitorItems}</div>
+    </article>`,
+    sentimentItems && `<article class="theme-card">
+      <div class="theme-head"><div><h2>Sentiment Breakdown</h2></div></div>
+      <div class="mentions">${sentimentItems}</div>
+    </article>`,
+    (index.evidenceQuality || []).length > 0 && `<article class="theme-card">
+      <div class="theme-head"><div><h2>Evidence Quality</h2></div></div>
+      <div class="mentions">${evidenceItems}</div>
+    </article>`,
+    founderOpportunityItems && `<article class="theme-card">
+      <div class="theme-head"><div><h2>What to Build</h2></div></div>
+      <div class="mentions">${founderOpportunityItems}</div>
+    </article>`,
+    founderAntiPatternItems && `<article class="theme-card">
+      <div class="theme-head"><div><h2>What to Avoid</h2></div></div>
+      <div class="mentions">${founderAntiPatternItems}</div>
+    </article>`,
+  ].filter(Boolean).join("\n");
+
   const subredditPills = subreddits.map(sub => `<span>r/${escapeHtml(sub)}</span>`).join("");
 
   return `<!DOCTYPE html>
@@ -408,25 +442,18 @@ function renderHtml({ index, posts, themes, topic, generatedAt }) {
     </section>
 
     <main class="grid">
-      <section class="themes">${themeCards || `<div class="panel">No theme files found.</div>`}</section>
-      <aside>
-        ${opportunityItems ? `<section class="panel"><h2>Top Opportunities</h2><ul class="signal-list">${opportunityItems}</ul></section>` : ""}
-        ${painItems ? `<section class="panel"><h2>Top Pain Points</h2><ul class="signal-list">${painItems}</ul></section>` : ""}
-        ${founderOpportunityItems ? `<section class="panel"><h2>What to Build</h2><ul class="signal-list">${founderOpportunityItems}</ul></section>` : ""}
-        ${founderAntiPatternItems ? `<section class="panel"><h2>What to Avoid</h2><ul class="signal-list">${founderAntiPatternItems}</ul></section>` : ""}
-        ${founderActionItems ? `<section class="panel"><h2>Action Items</h2><ul class="signal-list">${founderActionItems}</ul></section>` : ""}
-        ${personaItems ? `<section class="panel"><h2>User Personas</h2><ul class="signal-list">${personaItems}</ul></section>` : ""}
-        ${churnItems ? `<section class="panel"><h2>Churn Signals</h2><ul class="signal-list">${churnItems}</ul></section>` : ""}
-        ${competitorItems ? `<section class="panel"><h2>Competitor Switches</h2><ul class="signal-list">${competitorItems}</ul></section>` : ""}
-        ${sentimentItems ? `<section class="panel"><h2>Sentiment Breakdown</h2><ul class="signal-list">${sentimentItems}</ul></section>` : ""}
-        ${evidenceItems ? `<section class="panel"><h2>Evidence Quality</h2><ul class="signal-list">${evidenceItems}</ul></section>` : ""}
-        ${featureItems ? `<section class="panel"><h2>Feature Requests</h2><ul class="signal-list">${featureItems}</ul></section>` : ""}
-        ${copyHeadlineItems ? `<section class="panel"><h2>Landing Copy Headlines</h2><ul class="signal-list">${copyHeadlineItems}</ul></section>` : ""}
-        <section class="panel">
-          <h2>Source Files</h2>
-          <p class="meta">Inputs: <code>raw/index.json</code>, <code>raw/*.md</code>, <code>themes/*.md</code><br>Spreadsheet: <code>results.csv</code></p>
-        </section>
-      </aside>
+      <section class="themes">
+        ${themeCards}
+        ${skillCards}
+      </section>
+       <aside>
+         ${opportunityItems ? `<section class="panel"><h2>Top Opportunities</h2><ul class="signal-list">${opportunityItems}</ul></section>` : ""}
+         ${painItems ? `<section class="panel"><h2>Top Pain Points</h2><ul class="signal-list">${painItems}</ul></section>` : ""}
+         <section class="panel">
+           <h2>Source Files</h2>
+           <p class="meta">Inputs: <code>raw/index.json</code>, <code>raw/*.md</code>, <code>themes/*.md</code><br>Spreadsheet: <code>results.csv</code></p>
+         </section>
+       </aside>
     </main>
 
     <section style="margin-top:16px;">
