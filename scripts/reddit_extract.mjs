@@ -1,25 +1,17 @@
 #!/usr/bin/env node
-// reddit_extract.mjs — scrapes Reddit posts and comments for a given topic
+// reddit_extract.mjs — scrapes Reddit using public JSON API only
+// NO browser, NO bb, NO API keys needed
 //
 // Usage:
-//   node scripts/reddit_extract.mjs --topic "notion alternative" --output ~/Desktop/output
+//   node scripts/reddit_extract.mjs --topic "notion alternative"
 //   node scripts/reddit_extract.mjs --topic "notion" --subreddits productivity,notion,apps
-//   node scripts/reddit_extract.mjs --topic "notion" --limit 30 --time year
-//
-// What it does:
-//   1. Discovers relevant subreddits (or uses ones you provide)
-//   2. Searches each subreddit for high-signal posts
-//   3. Extracts post body + top comments
-//   4. Flags comments containing pain-point keywords
-//   5. Writes raw data to output/raw/{slug}.md
-//   6. Writes a summary to output/raw/index.json
+//   node scripts/reddit_extract.mjs --topic "notion" --limit 50 --time year
 
-import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-// ── Config ─────────────────────────────────────────────────────────
+// ── Config ───────────────────────────────────────────────────────────
 
 const PAIN_POINT_KEYWORDS = [
   "i wish", "why can't", "why cant", "so frustrating", "frustrated",
@@ -27,22 +19,38 @@ const PAIN_POINT_KEYWORDS = [
   "missing feature", "please add", "anyone else", "workaround",
   "hack", "broken", "slow", "expensive", "too complicated",
   "confusing", "alternative to", "hate", "annoying", "disappointed",
-  "cancelled", "canceled", "refund", "waste", "useless", "terrible",
+  "cancelled", "canceled", "refund", "useless", "terrible",
   "nightmare", "impossible", "does anyone know", "is there a way"
 ];
 
 const OPPORTUNITY_KEYWORDS = [
-  "does x exist", "is there a tool", "looking for", "need something",
+  "does x exist", "is there a tool", "looking for",
   "wish there was", "someone should build", "would pay for",
-  "would love", "dream feature", "if only"
+  "would love", "dream feature", "if only", "need something that"
 ];
 
 const DEFAULT_SEARCH_MODIFIERS = [
   "problem", "frustrated", "wish", "alternative",
-  "switched", "hate", "vs", "review"
+  "switched", "hate", "review", "help"
 ];
 
-// ── CLI args ────────────────────────────────────────────────────────
+const DEFAULT_SUBREDDITS = [
+  "productivity", "software", "apps", "tech",
+  "selfhosted", "nocode", "pkms"
+];
+
+const THEME_KEYWORDS = {
+  PRICING:         ["expensive", "price", "pricing", "cost", "cheap", "afford", "subscription", "free tier", "paid", "cancelled", "cancel"],
+  PERFORMANCE:     ["slow", "lag", "laggy", "crash", "crashes", "freeze", "hang", "speed", "performance"],
+  MISSING_FEATURE: ["wish", "feature", "please add", "would love", "missing", "add support", "when will", "roadmap"],
+  UX_CONFUSION:    ["confusing", "complicated", "hard to", "difficult", "learning curve", "onboarding", "intuitive"],
+  RELIABILITY:     ["bug", "broken", "sync", "data loss", "lost my", "corrupt", "error", "unreliable", "down"],
+  COMPETITOR_GAP:  ["switched to", "switched from", "better than", "worse than", "compared to", "vs ", "alternative"],
+  LOVE_SIGNALS:    ["love", "great", "amazing", "best", "perfect", "excellent", "recommend", "worth it"],
+  OPPORTUNITY:     ["does anyone know", "is there a tool", "looking for", "wish there was", "would pay", "someone should"],
+};
+
+// ── CLI args ─────────────────────────────────────────────────────────
 
 function getArg(name, fallback = null) {
   const idx = process.argv.indexOf(`--${name}`);
@@ -50,156 +58,119 @@ function getArg(name, fallback = null) {
   return fallback;
 }
 
-const TOPIC = getArg("topic");
-const OUTPUT_DIR = getArg("output", join(homedir(), "Desktop", "reddit-research"));
+const TOPIC          = getArg("topic");
+const OUTPUT_DIR     = getArg("output", join(homedir(), "Desktop", "reddit-research"));
 const SUBREDDITS_ARG = getArg("subreddits");
-const LIMIT = parseInt(getArg("limit", "40"), 10);
-const TIME = getArg("time", "year"); // hour, day, week, month, year, all
+const LIMIT          = parseInt(getArg("limit", "40"), 10);
+const TIME           = getArg("time", "year");
 
 if (!TOPIC) {
   console.error("ERROR: --topic is required");
-  console.error("Usage: node reddit_extract.mjs --topic \"your topic\"");
+  console.error('Usage: node reddit_extract.mjs --topic "your topic"');
   process.exit(1);
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────
 
 function slugify(s) {
   return (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/, "");
 }
 
-function browse(...args) {
-  try {
-    return execFileSync("browse", args, {
-      encoding: "utf-8",
-      timeout: 30000,
-      maxBuffer: 10 * 1024 * 1024,
-    }).trim();
-  } catch (err) {
-    return "";
-  }
-}
-
-function bbSearch(query, numResults = 10) {
-  try {
-    const out = execFileSync(
-      "bb",
-      ["search", query, "--num-results", String(numResults)],
-      { encoding: "utf-8", timeout: 20000 }
-    );
-    const data = JSON.parse(out);
-    return Array.isArray(data) ? data : (data.results || []);
-  } catch {
-    return [];
-  }
-}
-
 function containsKeywords(text, keywords) {
-  const lower = text.toLowerCase();
+  const lower = (text || "").toLowerCase();
   return keywords.filter(k => lower.includes(k));
 }
 
-function decodeEntities(text = "") {
-  return text
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, " ");
+function scorePost(title, body, commentCount, upvotes) {
+  const text      = `${title} ${body}`.toLowerCase();
+  const painCount = containsKeywords(text, PAIN_POINT_KEYWORDS).length;
+  const oppCount  = containsKeywords(text, OPPORTUNITY_KEYWORDS).length;
+  return (painCount * 3) + (oppCount * 5)
+    + Math.min(commentCount / 10, 10)
+    + Math.min(upvotes / 100, 10);
 }
 
-function cleanText(text = "") {
-  return decodeEntities(String(text))
-    .replace(/\r/g, "")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
 }
 
-function redditJsonUrl(postUrl) {
-  const clean = postUrl.split("?")[0].replace(/\/$/, "");
-  return `${clean}.json?sort=top&limit=50`;
-}
+// ── Reddit JSON API — pure fetch, zero dependencies ──────────────────
 
-async function fetchJson(url) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20000);
-
+async function fetchReddit(url) {
   try {
+    await sleep(500); // be polite to Reddit's servers
     const res = await fetch(url, {
       headers: {
-        "accept": "application/json",
-        "user-agent": "reddit-researcher/0.1 (+local research script)",
+        "User-Agent": "reddit-researcher-bot/1.0 (local research tool)",
+        "Accept":     "application/json",
       },
-      signal: controller.signal,
     });
-
     if (!res.ok) return null;
     return await res.json();
   } catch {
     return null;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
-async function redditSearch(subreddit, query, timeRange, limit = 10) {
-  const url = new URL(`https://www.reddit.com/r/${subreddit}/search.json`);
-  url.searchParams.set("q", query);
-  url.searchParams.set("restrict_sr", "1");
-  url.searchParams.set("sort", "top");
-  url.searchParams.set("t", timeRange);
-  url.searchParams.set("limit", String(limit));
-
-  const data = await fetchJson(url.toString());
-  const children = data?.data?.children;
-  if (!Array.isArray(children)) return [];
-
-  return children
+async function searchSubreddit(subreddit, query, time, limit = 15) {
+  const url  = `https://www.reddit.com/r/${subreddit}/search.json`
+             + `?q=${encodeURIComponent(query)}&sort=top&t=${time}&limit=${limit}&restrict_sr=1`;
+  const data = await fetchReddit(url);
+  if (!data?.data?.children) return [];
+  return data.data.children
     .filter(c => c.kind === "t3" && c.data?.permalink)
     .map(c => ({
-      url: `https://www.reddit.com${c.data.permalink}`,
-      title: c.data.title || "",
-      subreddit,
-      publishedDate: c.data.created_utc ? new Date(c.data.created_utc * 1000).toISOString() : null,
+      url:          `https://www.reddit.com${c.data.permalink}`,
+      permalink:    c.data.permalink,
+      title:        c.data.title       || "",
+      selftext:     c.data.selftext     || "",
+      upvotes:      c.data.score        || 0,
+      commentCount: c.data.num_comments || 0,
+      subreddit:    c.data.subreddit    || subreddit,
     }));
 }
 
-function extractCommentThings(children = [], out = []) {
-  for (const child of children) {
-    if (!child || child.kind !== "t1" || !child.data) continue;
-
-    const text = cleanText(child.data.body || "");
-    if (text && !["[deleted]", "[removed]"].includes(text.toLowerCase())) {
-      const painKeywords = containsKeywords(text, PAIN_POINT_KEYWORDS);
-      const oppKeywords = containsKeywords(text, OPPORTUNITY_KEYWORDS);
-
-      out.push({
-        text: text.slice(0, 1000),
-        upvotes: Number(child.data.ups || 0),
-        author: child.data.author || "",
-        painKeywords,
-        oppKeywords,
-        isHighSignal: painKeywords.length + oppKeywords.length >= 2,
-      });
-    }
-
-    const replies = child.data.replies;
-    if (replies && replies.data && Array.isArray(replies.data.children)) {
-      extractCommentThings(replies.data.children, out);
-    }
-  }
-
-  return out;
+async function getTopPosts(subreddit, time, limit = 10) {
+  const url  = `https://www.reddit.com/r/${subreddit}/top.json?t=${time}&limit=${limit}`;
+  const data = await fetchReddit(url);
+  if (!data?.data?.children) return [];
+  return data.data.children
+    .filter(c => c.kind === "t3" && c.data?.permalink)
+    .map(c => ({
+      url:          `https://www.reddit.com${c.data.permalink}`,
+      permalink:    c.data.permalink,
+      title:        c.data.title       || "",
+      selftext:     c.data.selftext     || "",
+      upvotes:      c.data.score        || 0,
+      commentCount: c.data.num_comments || 0,
+      subreddit:    c.data.subreddit    || subreddit,
+    }));
 }
 
-function scorePost(title, body, commentCount, upvotes) {
-  const text = `${title} ${body}`.toLowerCase();
-  const painMatches = containsKeywords(text, PAIN_POINT_KEYWORDS).length;
-  const oppMatches = containsKeywords(text, OPPORTUNITY_KEYWORDS).length;
-  // Higher score = more interesting post
-  return (painMatches * 3) + (oppMatches * 5) + Math.min(commentCount / 10, 10) + Math.min(upvotes / 100, 10);
+async function getComments(permalink) {
+  const url  = `https://www.reddit.com${permalink}.json?limit=50&sort=top`;
+  const data = await fetchReddit(url);
+  if (!Array.isArray(data) || !data[1]) return [];
+  return (data[1].data.children || [])
+    .filter(c => c.kind === "t1" && c.data?.body
+      && !["[deleted]", "[removed]"].includes(c.data.body))
+    .map(c => ({
+      text:    (c.data.body || "").slice(0, 500),
+      upvotes: c.data.score || 0,
+    }));
+}
+
+async function discoverSubredditsFromReddit(topic) {
+  const url  = `https://www.reddit.com/subreddits/search.json?q=${encodeURIComponent(topic)}&limit=10`;
+  const data = await fetchReddit(url);
+  const found = new Set();
+  if (data?.data?.children) {
+    for (const c of data.data.children) {
+      const sub = c.data?.display_name?.toLowerCase();
+      if (sub && !["all", "popular"].includes(sub)) found.add(sub);
+    }
+  }
+  return [...found];
 }
 
 // ── Step 1: Subreddit Discovery ──────────────────────────────────────
@@ -213,33 +184,13 @@ async function discoverSubreddits(topic) {
 
   console.log(`\n[1/6] Discovering subreddits for "${topic}"...`);
 
-  const results = bbSearch(`best subreddit for ${topic} users site:reddit.com`, 15);
-  const found = new Set();
+  // Use Reddit's own subreddit search
+  const fromReddit = await discoverSubredditsFromReddit(topic);
 
-  for (const r of results) {
-    // Extract r/subredditname patterns from URLs and titles
-    const matches = `${r.url} ${r.title}`.matchAll(/r\/([a-zA-Z0-9_]+)/g);
-    for (const m of matches) {
-      const sub = m[1].toLowerCase();
-      // Filter out meta/generic Reddit pages
-      if (!["reddit", "all", "popular", "home", "search"].includes(sub)) {
-        found.add(sub);
-      }
-    }
-  }
-
-  // Also do a direct search
-  const direct = bbSearch(`${topic} subreddit community reddit`, 10);
-  for (const r of direct) {
-    const matches = `${r.url} ${r.title}`.matchAll(/r\/([a-zA-Z0-9_]+)/g);
-    for (const m of matches) {
-      found.add(m[1].toLowerCase());
-    }
-  }
-
-  const subreddits = [...found].slice(0, 5);
-  console.log(`Found subreddits: ${subreddits.join(", ")}`);
-  return subreddits;
+  // Merge with sensible defaults
+  const merged = [...new Set([...fromReddit, ...DEFAULT_SUBREDDITS])].slice(0, 5);
+  console.log(`Found subreddits: ${merged.join(", ")}`);
+  return merged;
 }
 
 // ── Step 2: Post Discovery ───────────────────────────────────────────
@@ -248,220 +199,98 @@ async function discoverPosts(subreddits, topic) {
   console.log(`\n[2/6] Discovering posts across ${subreddits.length} subreddits...`);
 
   const allPosts = [];
-  const seen = new Set();
+  const seen     = new Set();
 
   function addPost(post) {
-    const clean = post.url.split("?")[0];
-    if (seen.has(clean)) return;
-
-    seen.add(clean);
-    allPosts.push({ ...post, url: clean });
+    const key = post.url.split("?")[0];
+    if (seen.has(key)) return;
+    seen.add(key);
+    allPosts.push({ ...post, url: key });
   }
 
   for (const sub of subreddits) {
     console.log(`  Searching r/${sub}...`);
 
-    const directResults = await redditSearch(sub, topic, TIME, 15);
-    for (const r of directResults) addPost(r);
+    // Direct topic search
+    const direct = await searchSubreddit(sub, topic, TIME, 15);
+    for (const r of direct) addPost(r);
 
-    // Search within subreddit.
-    for (const modifier of DEFAULT_SEARCH_MODIFIERS.slice(0, 4)) {
-      const redditResults = await redditSearch(sub, `${topic} ${modifier}`, TIME, 8);
-      for (const r of redditResults) addPost(r);
+    // Pain-point modifier searches
+    for (const modifier of DEFAULT_SEARCH_MODIFIERS.slice(0, 3)) {
+      const results = await searchSubreddit(sub, `${topic} ${modifier}`, TIME, 8);
+      for (const r of results) addPost(r);
     }
 
-    // Browserbase search is useful, but noisy when local credentials are absent.
-    // Prefer Reddit JSON and only fall back if we still need more candidates.
-    if (allPosts.length < LIMIT) {
-      for (const modifier of DEFAULT_SEARCH_MODIFIERS.slice(0, 4)) {
-        const query = `${topic} ${modifier} site:reddit.com/r/${sub}`;
-        const results = bbSearch(query, 8);
-
-        for (const r of results) {
-          if (!r.url.includes("reddit.com/r/")) continue;
-          if (!r.url.includes("/comments/")) continue; // only actual posts
-
-          addPost({
-            url: r.url,
-            title: r.title || "",
-            subreddit: sub,
-            publishedDate: r.publishedDate || null,
-          });
-        }
-      }
+    // Top posts that mention the topic
+    const top = await getTopPosts(sub, TIME, 10);
+    for (const r of top) {
+      const firstWord = topic.toLowerCase().split(" ")[0];
+      if (r.title.toLowerCase().includes(firstWord)) addPost(r);
     }
 
-    if (allPosts.length >= LIMIT) continue;
-
-    try {
-      browse("env", "local");
-      browse("open", `https://www.reddit.com/r/${sub}/search/?q=${encodeURIComponent(topic)}&sort=top&t=${TIME}`);
-      browse("wait", "load");
-      browse("wait", "timeout", "2000");
-      const snapshot = browse("snapshot");
-
-      // Extract post links from snapshot
-      const postLinks = snapshot.match(/https:\/\/www\.reddit\.com\/r\/[^/]+\/comments\/[^\s"')]+/g) || [];
-      for (const link of postLinks) {
-        addPost({ url: link, title: "", subreddit: sub, publishedDate: null });
-      }
-    } catch {
-      // browser might not be available — that's ok
-    }
+    console.log(`    r/${sub}: ${allPosts.length} posts so far`);
   }
 
-  console.log(`  Found ${allPosts.length} unique posts`);
+  console.log(`  Total unique posts: ${allPosts.length}`);
   return allPosts.slice(0, LIMIT);
 }
 
 // ── Step 3: Content Extraction ───────────────────────────────────────
 
-async function extractPostFromJson(postUrl) {
-  const data = await fetchJson(redditJsonUrl(postUrl));
-  if (!Array.isArray(data) || !data[0]?.data?.children?.[0]?.data) return null;
-
-  const postData = data[0].data.children[0].data;
-  const title = cleanText(postData.title || "");
-  const body = cleanText(postData.selftext || "");
-  const upvotes = Number(postData.ups || postData.score || 0);
-  const commentCount = Number(postData.num_comments || 0);
-  const comments = extractCommentThings(data[1]?.data?.children || [])
-    .sort((a, b) => b.upvotes - a.upvotes)
-    .slice(0, 50);
-
-  const flaggedComments = comments.filter(c => c.painKeywords.length > 0 || c.oppKeywords.length > 0);
-  const score = scorePost(title, body, commentCount, upvotes);
-
-  return {
-    url: postUrl,
-    title,
-    body,
-    upvotes,
-    commentCount,
-    comments,
-    flaggedComments,
-    score,
-    highSignalComments: comments.filter(c => c.isHighSignal),
-  };
-}
-
-function extractPostFromBrowser(postUrl) {
+async function extractPost(post) {
   try {
-    browse("open", postUrl);
-    browse("wait", "load");
-    browse("wait", "timeout", "1500");
+    const rawComments = await getComments(post.permalink);
+    const comments    = [];
 
-    const pageText = browse("get", "text", "body");
-    if (!pageText || pageText.length < 100) return null;
-
-    // Extract title
-    const titleMatch = pageText.match(/^(.+?)\n/);
-    const title = titleMatch ? titleMatch[1].trim() : "";
-
-    // Split into post body and comments (rough split)
-    const lines = pageText.split("\n").map(l => l.trim()).filter(Boolean);
-
-    // Find upvote count
-    const upvoteMatch = pageText.match(/(\d+(?:,\d+)?)\s*(?:points?|upvotes?|votes?)/i);
-    const upvotes = upvoteMatch ? parseInt(upvoteMatch[1].replace(",", ""), 10) : 0;
-
-    // Find comment count
-    const commentMatch = pageText.match(/(\d+)\s*comments?/i);
-    const commentCount = commentMatch ? parseInt(commentMatch[1], 10) : 0;
-
-    // Extract body text (first ~500 chars after title)
-    const bodyStart = lines.findIndex(l => l.length > 50 && l !== title);
-    const bodyLines = lines.slice(bodyStart, bodyStart + 10).join(" ");
-    const body = bodyLines.slice(0, 600);
-
-    // Extract comments — browser output is noisy, so keep only lines with signal.
-    const comments = [];
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (line.length < 30) continue; // skip short lines
-
-      const painKeywords = containsKeywords(line, PAIN_POINT_KEYWORDS);
-      const oppKeywords = containsKeywords(line, OPPORTUNITY_KEYWORDS);
-
+    for (const c of rawComments) {
+      if (c.text.length < 30) continue;
+      const painKeywords = containsKeywords(c.text, PAIN_POINT_KEYWORDS);
+      const oppKeywords  = containsKeywords(c.text, OPPORTUNITY_KEYWORDS);
       if (painKeywords.length > 0 || oppKeywords.length > 0) {
         comments.push({
-          text: line.slice(0, 400),
+          text:         c.text,
+          upvotes:      c.upvotes,
           painKeywords,
           oppKeywords,
-          isHighSignal: painKeywords.length + oppKeywords.length >= 2,
+          isHighSignal: (painKeywords.length + oppKeywords.length) >= 2,
         });
       }
-
-      if (comments.length >= 15) break;
     }
 
-    const score = scorePost(title, body, commentCount, upvotes);
+    const body  = (post.selftext || "").slice(0, 600);
+    const score = scorePost(post.title, body, post.commentCount, post.upvotes);
 
     return {
-      url: postUrl,
-      title,
+      ...post,
       body,
-      upvotes,
-      commentCount,
       comments,
-      flaggedComments: comments,
       score,
       highSignalComments: comments.filter(c => c.isHighSignal),
     };
   } catch (err) {
-    console.error(`  Failed to extract ${postUrl}: ${err.message}`);
+    console.error(`  Failed: ${post.url} — ${err.message}`);
     return null;
   }
-}
-
-async function extractPost(postUrl) {
-  return await extractPostFromJson(postUrl) || extractPostFromBrowser(postUrl);
 }
 
 // ── Step 4: Theme Detection ──────────────────────────────────────────
 
 function detectThemes(posts) {
-  const themes = {
-    PRICING: [],
-    PERFORMANCE: [],
-    MISSING_FEATURE: [],
-    UX_CONFUSION: [],
-    RELIABILITY: [],
-    COMPETITOR_GAP: [],
-    LOVE_SIGNALS: [],
-    OPPORTUNITY: [],
-  };
-
-  const themeKeywords = {
-    PRICING: ["expensive", "price", "pricing", "cost", "cheap", "afford", "subscription", "free tier", "paid", "cancelled", "cancel"],
-    PERFORMANCE: ["slow", "lag", "laggy", "crash", "crashes", "freeze", "hang", "fast", "speed", "performance"],
-    MISSING_FEATURE: ["wish", "feature", "please add", "would love", "missing", "add support", "when will", "roadmap"],
-    UX_CONFUSION: ["confusing", "complicated", "hard to", "difficult", "learning curve", "onboarding", "intuitive", "ux", "ui"],
-    RELIABILITY: ["bug", "broken", "sync", "data loss", "lost my", "corrupt", "error", "unreliable", "down"],
-    COMPETITOR_GAP: ["switched to", "switched from", "better than", "worse than", "compared to", "vs ", "alternative"],
-    LOVE_SIGNALS: ["love", "great", "amazing", "best", "perfect", "excellent", "recommend", "worth it"],
-    OPPORTUNITY: ["does anyone know", "is there a tool", "looking for", "wish there was", "would pay", "someone should"],
-  };
+  const themes = Object.fromEntries(Object.keys(THEME_KEYWORDS).map(k => [k, []]));
 
   for (const post of posts) {
     if (!post) continue;
     const allText = `${post.title} ${post.body} ${post.comments.map(c => c.text).join(" ")}`.toLowerCase();
 
-    for (const [theme, keywords] of Object.entries(themeKeywords)) {
+    for (const [theme, keywords] of Object.entries(THEME_KEYWORDS)) {
       const matches = keywords.filter(k => allText.includes(k));
       if (matches.length > 0) {
-        const matchingComments = post.comments.filter(c => {
-          const text = c.text.toLowerCase();
-          return keywords.some(k => text.includes(k));
-        });
-
         themes[theme].push({
-          url: post.url,
-          title: post.title,
-          matchedKeywords: matches,
+          url:                post.url,
+          title:              post.title,
+          matchedKeywords:    matches,
           highSignalComments: post.highSignalComments,
-          matchingComments,
-          score: post.score,
+          score:              post.score,
         });
       }
     }
@@ -470,99 +299,73 @@ function detectThemes(posts) {
   return themes;
 }
 
-// ── Step 5: Write Output ─────────────────────────────────────────────
+// ── Step 5: Write Files ──────────────────────────────────────────────
 
 function writePostFile(post, outputDir) {
-  const slug = slugify(post.title || post.url.split("/").slice(-2, -1)[0]);
+  const slug     = slugify(post.title || post.url.split("/").slice(-2, -1)[0]);
   const filePath = join(outputDir, "raw", `${slug}.md`);
+  const lines    = [
+    `# ${post.title}`,
+    ``,
+    `**URL**: ${post.url}`,
+    `**Subreddit**: r/${post.subreddit}`,
+    `**Upvotes**: ${post.upvotes} | **Comments**: ${post.commentCount} | **Score**: ${post.score.toFixed(1)}`,
+    ``,
+    `## Post Body`,
+    post.body || "(no body text)",
+    ``,
+    `## High Signal Comments (${post.highSignalComments.length})`,
+  ];
 
-  const content = `# ${post.title}
+  for (const c of post.highSignalComments) {
+    lines.push(``, `> ${c.text}`, ``);
+    lines.push(`Pain: \`${c.painKeywords.join(", ") || "none"}\``);
+    lines.push(`Opportunity: \`${c.oppKeywords.join(", ") || "none"}\``);
+  }
 
-**URL**: ${post.url}
-**Upvotes**: ${post.upvotes}
-**Comments**: ${post.commentCount}
-**Signal Score**: ${post.score.toFixed(1)}
+  lines.push(``, `## All Flagged Comments (${post.comments.length})`);
+  for (const c of post.comments) lines.push(`- ${c.text.slice(0, 200)}`);
 
-## Post Body
-${post.body}
-
-## High Signal Comments (${post.highSignalComments.length})
-${post.highSignalComments.map(c => `
-### Comment
-> ${c.text}
-
-**Pain keywords**: ${c.painKeywords.join(", ") || "none"}
-**Opportunity keywords**: ${c.oppKeywords.join(", ") || "none"}
-`).join("\n")}
-
-## All Flagged Comments (${post.flaggedComments.length})
-${post.flaggedComments.map(c => `- ${c.text.slice(0, 300)}`).join("\n")}
-
-## Top Comments Extracted (${post.comments.length})
-${post.comments.slice(0, 15).map(c => `- (${c.upvotes} upvotes) ${c.text.slice(0, 300)}`).join("\n")}
-`;
-
-  writeFileSync(filePath, content);
-  return filePath;
+  writeFileSync(filePath, lines.join("\n"));
 }
 
 function writeThemeFiles(themes, outputDir) {
-  const themesDir = join(outputDir, "themes");
-  mkdirSync(themesDir, { recursive: true });
-
   for (const [theme, posts] of Object.entries(themes)) {
     if (posts.length === 0) continue;
-
-    const filePath = join(themesDir, `${theme.toLowerCase()}.md`);
-    const content = `---
-theme: ${theme}
-mention_count: ${posts.length}
-high_signal_count: ${posts.filter(p => p.highSignalComments && p.highSignalComments.length > 0).length}
----
-
-# ${theme} (${posts.length} mentions)
-
-## Posts in this theme
-${posts.sort((a, b) => b.score - a.score).map(p => `
-### ${p.title || "Untitled"}
-- **URL**: ${p.url}
-- **Matched**: ${p.matchedKeywords.join(", ")}
-- **High signal comments**: ${(p.highSignalComments || []).length}
-
-${((p.matchingComments || []).length > 0 ? p.matchingComments : (p.highSignalComments || [])).slice(0, 3).map(c => `> "${c.text.slice(0, 300)}"`).join("\n\n")}
-`).join("\n---\n")}
-`;
-    writeFileSync(filePath, content);
+    const filePath = join(outputDir, "themes", `${theme.toLowerCase()}.md`);
+    const lines    = [
+      `---`, `theme: ${theme}`, `mention_count: ${posts.length}`, `---`,
+      ``, `# ${theme} — ${posts.length} mentions`, ``,
+    ];
+    for (const p of posts.sort((a, b) => b.score - a.score)) {
+      lines.push(`## ${p.title || "Untitled"}`);
+      lines.push(`- **URL**: ${p.url}`);
+      lines.push(`- **Matched**: ${p.matchedKeywords.join(", ")}`);
+      lines.push(``);
+      for (const c of (p.highSignalComments || []).slice(0, 3)) {
+        lines.push(`> "${c.text.slice(0, 300)}"`, ``);
+      }
+      lines.push(`---`, ``);
+    }
+    writeFileSync(filePath, lines.join("\n"));
   }
 }
 
 function writeIndexJson(posts, themes, subreddits, outputDir) {
-  const topPainPoints = [
-    ...new Map(
-      themes.PRICING.concat(themes.MISSING_FEATURE)
-        .sort((a, b) => b.score - a.score)
-        .map(p => [p.url, { title: p.title, url: p.url }])
-    ).values()
-  ].slice(0, 10);
-
   const index = {
-    topic: TOPIC,
+    topic:                TOPIC,
     subreddits,
-    totalPosts: posts.filter(Boolean).length,
-    totalComments: posts.filter(Boolean).reduce((sum, p) => sum + p.commentCount, 0),
-    totalFlaggedComments: posts.filter(Boolean).reduce((sum, p) => sum + (p.flaggedComments || []).length, 0),
-    themeBreakdown: Object.fromEntries(
-      Object.entries(themes).map(([k, v]) => [k, v.length])
-    ),
-    topOpportunities: themes.OPPORTUNITY.slice(0, 5).map(p => ({
-      title: p.title,
-      url: p.url,
-      score: p.score,
-    })),
-    topPainPoints,
+    totalPosts:           posts.filter(Boolean).length,
+    totalComments:        posts.filter(Boolean).reduce((s, p) => s + p.commentCount, 0),
+    totalFlaggedComments: posts.filter(Boolean).reduce((s, p) => s + p.comments.length, 0),
+    themeBreakdown:       Object.fromEntries(Object.entries(themes).map(([k, v]) => [k, v.length])),
+    topOpportunities:     themes.OPPORTUNITY.slice(0, 5).map(p => ({ title: p.title, url: p.url, score: p.score })),
+    topPainPoints:        [...themes.PRICING, ...themes.MISSING_FEATURE]
+                            .sort((a, b) => b.score - a.score)
+                            .slice(0, 10)
+                            .map(p => ({ title: p.title, url: p.url })),
     generatedAt: new Date().toISOString(),
   };
-
   writeFileSync(join(outputDir, "raw", "index.json"), JSON.stringify(index, null, 2));
   return index;
 }
@@ -573,72 +376,62 @@ async function main() {
   console.log(`\n${"=".repeat(60)}`);
   console.log(`  REDDIT RESEARCHER — "${TOPIC}"`);
   console.log(`${"=".repeat(60)}`);
-  console.log(`Output: ${OUTPUT_DIR}`);
-  console.log(`Post limit: ${LIMIT} | Time range: ${TIME}\n`);
+  console.log(`Output : ${OUTPUT_DIR}`);
+  console.log(`Limit  : ${LIMIT} posts | Time: ${TIME}`);
+  console.log(`Mode   : Reddit JSON API only (no browser, no API key)\n`);
 
-  // Create output dirs
-  mkdirSync(join(OUTPUT_DIR, "raw"), { recursive: true });
+  mkdirSync(join(OUTPUT_DIR, "raw"),    { recursive: true });
   mkdirSync(join(OUTPUT_DIR, "themes"), { recursive: true });
 
-  // Step 1: Find subreddits
+  // Step 1 — subreddits
   const subreddits = await discoverSubreddits(TOPIC);
   writeFileSync(join(OUTPUT_DIR, "subreddits.txt"), subreddits.join("\n"));
 
-  // Step 2: Discover posts
+  // Step 2 — posts
   const postList = await discoverPosts(subreddits, TOPIC);
-  console.log(`\n[3/6] Extracting content from ${postList.length} posts...`);
 
-  // Step 3: Extract each post
+  // Step 3 — extract
+  console.log(`\n[3/6] Extracting content from ${postList.length} posts...`);
   const posts = [];
   for (let i = 0; i < postList.length; i++) {
     const p = postList[i];
-    console.log(`  [${i + 1}/${postList.length}] ${p.url.slice(0, 70)}...`);
-    const extracted = await extractPost(p.url);
+    process.stdout.write(`  [${i + 1}/${postList.length}] ${p.title.slice(0, 55)}...\r`);
+    const extracted = await extractPost(p);
     if (extracted) {
-      extracted.subreddit = p.subreddit;
       writePostFile(extracted, OUTPUT_DIR);
       posts.push(extracted);
     }
   }
+  console.log(`\n  Extracted ${posts.length} posts successfully`);
 
-  console.log(`\n[4/6] Detecting themes across ${posts.length} posts...`);
-
-  // Step 4: Cluster themes
+  // Step 4 — themes
+  console.log(`\n[4/6] Detecting themes...`);
   const themes = detectThemes(posts);
   writeThemeFiles(themes, OUTPUT_DIR);
 
-  console.log(`\n[5/6] Writing index and PMF signals...`);
-
-  // Step 5: Write index
+  // Step 5 — index
+  console.log(`[5/6] Writing index...`);
   const index = writeIndexJson(posts, themes, subreddits, OUTPUT_DIR);
 
-  // Step 6: Print summary
+  // Step 6 — summary
   console.log(`\n[6/6] Done!\n`);
   console.log(`${"=".repeat(60)}`);
-  console.log(`  RESULTS SUMMARY`);
+  console.log(`  RESULTS`);
   console.log(`${"=".repeat(60)}`);
-  console.log(`Posts analyzed:      ${posts.length}`);
-  console.log(`Subreddits searched: ${subreddits.join(", ")}`);
+  console.log(`Posts analyzed : ${posts.length}`);
+  console.log(`Subreddits     : ${subreddits.join(", ")}`);
   console.log(`\nTheme Breakdown:`);
-
   for (const [theme, items] of Object.entries(themes)) {
-    if (items.length > 0) {
-      console.log(`  ${theme.padEnd(20)} ${items.length} mentions`);
-    }
+    if (items.length > 0) console.log(`  ${theme.padEnd(20)} ${items.length} mentions`);
   }
-
   if (index.topOpportunities.length > 0) {
-    console.log(`\nTop Opportunity Posts:`);
-    for (const opp of index.topOpportunities) {
-      console.log(`  - ${opp.title.slice(0, 60)}`);
-      console.log(`    ${opp.url}`);
+    console.log(`\nTop Opportunities:`);
+    for (const o of index.topOpportunities) {
+      console.log(`  - ${o.title.slice(0, 60)}`);
+      console.log(`    ${o.url}`);
     }
   }
-
-  console.log(`\nOutput saved to: ${OUTPUT_DIR}`);
-  console.log(`Run compile_report.mjs next to generate the HTML report`);
-
-  // Output JSON summary to stdout for compile_report.mjs
+  console.log(`\nOutput: ${OUTPUT_DIR}`);
   console.log(JSON.stringify(index));
 }
 
