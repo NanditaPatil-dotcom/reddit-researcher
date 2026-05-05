@@ -583,6 +583,382 @@ function writeIndexJson(posts, themes, subreddits, outputDir) {
   return index;
 }
 
+// ── Skill: Churn Signal Extraction ───────────────────────────────
+
+function extractChurnSignals(posts) {
+  const churnSignals = [];
+  const churnPatterns = [
+    /\bcancelled\b/gi, /\bcanceled\b/gi, /\bcancelling\b/gi,
+    /\bswitched (?:to|from)\b/gi, /\bmoved (?:to|from)\b/gi,
+    /\bleft (?:\w+ )?\b/gi, /\bdone with\b/gi,
+    /\bdeal.?breaker\b/gi, /\bnot worth it\b/gi,
+    /\btoo expensive\b/gi, /\bcan'?t justify\b/gi,
+    /\bwaste (?:of )?money\b/gi, /\brefund\b/gi,
+    /\bgiving up\b/gi, /\bwon'?t renew\b/gi
+  ];
+
+  for (const post of posts) {
+    if (!post) continue;
+    const allText = `${post.title} ${post.body} ${post.comments.map(c => c.text).join(" ")}`;
+    for (const pattern of churnPatterns) {
+      const matches = allText.match(pattern);
+      if (matches) {
+        for (const m of matches) {
+          churnSignals.push({
+            type: "churn",
+            postUrl: post.url,
+            postTitle: post.title,
+            upvotes: post.upvotes,
+            excerpt: m,
+            source: "reddit"
+          });
+        }
+      }
+    }
+    for (const c of post.highSignalComments || []) {
+      for (const pattern of churnPatterns) {
+        if (pattern.test(c.text)) {
+          churnSignals.push({
+            type: "churn",
+            postUrl: post.url,
+            commentText: c.text.slice(0, 300),
+            upvotes: c.upvotes,
+            excerpt: c.text.slice(0, 150),
+            source: "comment"
+          });
+        }
+      }
+    }
+  }
+  return churnSignals;
+}
+
+// ── Skill: Competitor Matrix ───────────────────────────────────────
+
+function buildCompetitorMatrix(posts) {
+  const switches = [];
+  const switchPatterns = [
+    { dir: "FROM", pattern: /(?:switched|moved|migrated) (?:away )?(?:from|off) (\w[\w\s]*)/gi },
+    { dir: "TO", pattern: /(?:switched|moved|migrated) (?:to|over to) (\w[\w\s]*)/gi },
+    { dir: "FROM", pattern: /(?:leaving|quitting) (\w[\w\s]*)/gi },
+    { dir: "TO", pattern: /(?:going|over to) (\w[\w\s]*)/gi },
+    { dir: "FROM", pattern: /(?:from|off|using) (\w+?) (?:to|now|instead)/gi },
+    { dir: "TO", pattern: /(?:to|now using) (\w[\w\s]*?)(?: instead| now)?/gi }
+  ];
+
+  const competitors = new Map();
+
+  for (const post of posts) {
+    if (!post) continue;
+    const allText = `${post.title} ${post.body} ${post.comments.map(c => c.text).join(" ")}`.toLowerCase();
+    for (const { dir, pattern } of switchPatterns) {
+      const matches = [...allText.matchAll(pattern)];
+      for (const match of matches) {
+        const competitor = match[1]?.trim();
+        if (competitor && competitor.length > 2 && competitor.length < 50) {
+          const key = `${dir}:${competitor}`;
+          if (!competitors.has(key)) {
+            competitors.set(key, {
+              direction: dir,
+              name: competitor,
+              count: 0,
+              posts: [],
+              quotes: []
+            });
+          }
+          const entry = competitors.get(key);
+          entry.count++;
+          entry.posts.push(post.url);
+          entry.quotes.push({
+            text: allText.slice(Math.max(0, match.index - 50), Math.min(allText.length, match.index + 100)),
+            url: post.url
+          });
+        }
+      }
+    }
+  }
+
+  return Array.from(competitors.values()).sort((a, b) => b.count - a.count);
+}
+
+// ── Skill: Persona Detection ───────────────────────────────────────
+
+function detectPersonas(posts) {
+  const personaPatterns = {
+    student: /\b(student|cs major|thesis|college|university|class|assignment|professor)\b/gi,
+    founder: /\b(founder|startup|yc|seed|funding|my company|entrepreneur)\b/gi,
+    engineer: /\b(engineer|developer|devops|backend|frontend|api|codebase|git)\b/gi,
+    creator: /\b(creator|influencer|youtuber|content|subscriber|follower)\b/gi,
+    "team-lead": /\b(manager|team lead|lead engineer|cto|director|head of)\b/gi,
+    freelancer: /\b(freelancer|contractor|gig|client|project)\b/gi,
+    designer: /\b(designer|figma|ui.?ux|wireframe|prototype)\b/gi,
+    marketer: /\b(marketer|growth|seo|conversion|campaign|roi)\b/gi,
+    "small-business": /\b(small business|shop|local|retail|owner)\b/gi,
+    enterprise: /\b(enterprise|corporate|large company|at scale)\b/gi
+  };
+
+  const results = {};
+  for (const persona in personaPatterns) {
+    results[persona] = { count: 0, quotes: [], posts: [] };
+  }
+
+  for (const post of posts) {
+    if (!post) continue;
+    const allText = `${post.title} ${post.body} ${post.comments.map(c => c.text).join(" ")}`;
+    const lowerText = allText.toLowerCase();
+    for (const [persona, pattern] of Object.entries(personaPatterns)) {
+      const matches = [...lowerText.matchAll(pattern)];
+      if (matches.length > 0) {
+        results[persona].count += matches.length;
+        results[persona].posts.push(post.url);
+        results[persona].quotes.push({
+          excerpt: allText.slice(0, 200),
+          matches: matches.map(m => m[0]),
+          url: post.url
+        });
+      }
+    }
+  }
+
+  return results;
+}
+
+// ── Skill: Sentiment Scoring ───────────────────────────────────────
+
+function scoreSentiment(posts) {
+  const categories = {
+    frustration: { words: ["frustrating", "infuriating", "annoying", "disappointed", "angry", "terrible", "awful", "hate"], count: 0, quotes: [] },
+    praise: { words: ["love", "amazing", "perfect", "excellent", "great", "wonderful", "fantastic", "best"], count: 0, quotes: [] },
+    confusion: { words: ["confusing", "complicated", "unclear", "don't understand", "no idea", "uncertain"], count: 0, quotes: [] },
+    urgency: { words: ["urgent", "critical", "emergency", "asap", "immediately", "blocked", "deadline"], count: 0, quotes: [] },
+    workaround: { words: ["hack", "workaround", "trick", "cobbled", "kludge"], count: 0, quotes: [] },
+    "churn-risk": { words: ["cancelled", "canceled", "switching", "leaving", "won't renew"], count: 0, quotes: [] }
+  };
+
+  for (const post of posts) {
+    if (!post) continue;
+    const allComments = [post.body, ...post.comments.map(c => c.text)];
+    for (const text of allComments) {
+      if (!text) continue;
+      const lower = text.toLowerCase();
+      for (const type of Object.keys(categories)) {
+        for (const word of categories[type].words) {
+          if (lower.includes(word)) {
+            categories[type].count++;
+            categories[type].quotes.push({ text: text.slice(0, 200), source: post.url, upvotes: post.upvotes });
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  return categories;
+}
+
+// ── Skill: Feature Request Ranking ──────────────────────────────────
+
+function rankFeatureRequests(posts) {
+  const requests = new Map();
+
+  const requestPatterns = [
+    /(?:wish|want|need) (?:to|a|an|the) ([\w\s]+?)(?:\.|,|!|$)/gi,
+    /(?:please|plz) (?:add|include|support) ([\w\s]+?)(?:\.|,|$)/gi,
+    /(?:(?:should|could) (?:have|include)|missing) (?:a|an|the)? ([\w\s]+?)(?:\.|,|$)/gi,
+    /(?:feature|option|setting) (?:for|request) ([\w\s]+?)(?:\.|,|$)/gi
+  ];
+
+  for (const post of posts) {
+    if (!post) continue;
+    const allText = `${post.title} ${post.body} ${post.comments.map(c => c.text).join(" ")}`;
+    const lowerText = allText.toLowerCase();
+
+    for (const pattern of requestPatterns) {
+      const matches = [...lowerText.matchAll(pattern)];
+      for (const match of matches) {
+        const feature = match[1]?.trim();
+        if (feature && feature.length > 3 && feature.length < 100) {
+          if (!requests.has(feature)) {
+            requests.set(feature, { feature, frequency: 0, intensity: 0, agreement: 0, quotes: [] });
+          }
+          const req = requests.get(feature);
+          req.frequency++;
+          req.agreement += Math.floor(post.upvotes / 50) + 1;
+          if (lowerText.includes("critical") || lowerText.includes("must")) req.intensity += 3;
+          else if (lowerText.includes("need") || lowerText.includes("wish")) req.intensity += 2;
+          else req.intensity += 1;
+          req.quotes.push({ text: allText.slice(0, 150), url: post.url });
+        }
+      }
+    }
+  }
+
+  const ranked = [...requests.values()]
+    .map(r => ({ ...r, score: r.frequency + r.intensity + Math.min(r.agreement, 10) }))
+    .sort((a, b) => b.score - a.score);
+
+  return ranked.slice(0, 20);
+}
+
+// ── Skill: Evidence Quality Scoring ──────────────────────────────────
+
+function scoreEvidence(posts) {
+  const scored = [];
+
+  for (const post of posts) {
+    if (!post) continue;
+    const allComments = [post.body, ...post.comments.map(c => c.text)];
+
+    for (const [idx, text] of allComments.entries()) {
+      if (!text || text.length < 30) continue;
+
+      const upvotes = idx === 0 ? post.upvotes : post.comments[idx - 1]?.upvotes || 0;
+      let authority = 5;
+      if (upvotes >= 500) authority = 25;
+      else if (upvotes >= 200) authority = 20;
+      else if (upvotes >= 50) authority = 15;
+      else if (upvotes >= 10) authority = 10;
+
+      const engagement = post.commentCount > 25 ? 20 : post.commentCount > 10 ? 15 : post.commentCount > 3 ? 10 : 5;
+      const recency = 15;
+      const corroboration = 10;
+      const total = Math.min(authority + engagement + recency + corroboration, 100);
+
+      scored.push({
+        text: text.slice(0, 300),
+        score: total,
+        authority, engagement, recency, corroboration,
+        upvotes, url: post.url,
+        tier: total >= 90 ? "exceptional" : total >= 70 ? "high" : total >= 50 ? "moderate" : total >= 30 ? "low" : "minimal"
+      });
+    }
+  }
+
+  return scored.sort((a, b) => b.score - a.score).slice(0, 50);
+}
+
+// ── Skill: CSV Schema Enforcement ───────────────────────────────────
+
+function enforceCsvSchema(posts) {
+  const rows = [];
+  for (const post of posts) {
+    if (!post) continue;
+    rows.push({
+      topic: TOPIC,
+      date: new Date().toISOString().split("T")[0],
+      subreddit: post.subreddit,
+      post_id: post.url.split("/").slice(-2, -1)[0],
+      post_url: post.url,
+      post_title: post.title.replace(/"/g, '""'),
+      post_upvotes: post.upvotes,
+      comment_id: "",
+      comment_text: "",
+      category: "",
+      sentiment: "",
+      persona: "",
+      is_churn_signal: "false",
+      competitive_tool: "",
+      switch_direction: "",
+      quote_quality: "",
+      evidence_source: "post",
+      extracted_date: new Date().toISOString()
+    });
+    for (const c of post.comments) {
+      rows.push({
+        topic: TOPIC,
+        date: new Date().toISOString().split("T")[0],
+        subreddit: post.subreddit,
+        post_id: post.url.split("/").slice(-2, -1)[0],
+        post_url: post.url,
+        post_title: post.title.replace(/"/g, '""'),
+        post_upvotes: post.upvotes,
+        comment_id: "c" + Math.random().toString(36).substr(2, 9),
+        comment_text: (c.text || "").replace(/"/g, '""').slice(0, 500),
+        category: "",
+        sentiment: "",
+        persona: "",
+        is_churn_signal: "false",
+        competitive_tool: "",
+        switch_direction: "",
+        quote_quality: "",
+        evidence_source: "comment",
+        extracted_date: new Date().toISOString()
+      });
+    }
+  }
+  return rows;
+}
+
+// ── Skill: Landing Page Copy Generator ──────────────────────────────
+
+function generateLandingCopy(posts) {
+  const headlines = [];
+  const testimonials = [];
+  const valueProps = [];
+
+  for (const post of posts) {
+    if (!post) continue;
+    const allComments = [post.body, ...post.comments.map(c => c.text)];
+    for (const text of allComments) {
+      if (!text) continue;
+      const lower = text.toLowerCase();
+      if (lower.includes("love") || lower.includes("perfect") || lower.includes("exactly")) {
+        testimonials.push(text.slice(0, 200));
+      }
+      if (lower.includes("frustrating") || lower.includes("tired of") || lower.includes("wish")) {
+        const words = text.split(" ").slice(0, 10).join(" ");
+        headlines.push(words);
+      }
+      if (lower.includes("because") || lower.includes("helps") || lower.includes("allows")) {
+        valueProps.push(text.slice(0, 150));
+      }
+    }
+  }
+
+  return {
+    headlines: [...new Set(headlines)].slice(0, 5),
+    testimonials: [...new Set(testimonials)].slice(0, 5),
+    valueProps: [...new Set(valueProps)].slice(0, 5)
+  };
+}
+
+// ── Skill: Founder Summary Mode ─────────────────────────────────────
+
+function generateFounderSummary(posts, churn, competitors, personas, sentiment, features) {
+  const opportunities = features.slice(0, 5).map(f => ({
+    title: f.feature,
+    evidence: `${f.frequency} mentions, intensity ${f.intensity}`,
+    quotes: f.quotes.slice(0, 2)
+  }));
+
+  const antiPatterns = churn.slice(0, 3).map(c => ({
+    title: c.excerpt || "Churn risk",
+    evidence: c.postUrl,
+    severity: "high"
+  }));
+
+  const positioning = [];
+  for (const t of sentiment.frustration.quotes.slice(0, 3)) {
+    positioning.push(`"${t.text.slice(0, 80)}..."`);
+  }
+
+  const topPersona = Object.entries(personas)
+    .sort((a, b) => b[1].count - a[1].count)[0];
+
+  return {
+    opportunities,
+    antiPatterns,
+    positioning,
+    topPersona: topPersona ? topPersona[0] : "unknown",
+    competitorInsights: competitors.slice(0, 5),
+    actionItems: [
+      { priority: "P0", action: `Build: ${features[0]?.feature || "Top requested feature"}` },
+      { priority: "P1", action: `Fix: ${antiPatterns[0]?.title || "Churn issue"}` },
+      { priority: "P2", action: "Position: On pain points from user quotes" }
+    ]
+  };
+}
+
 // ── Main ─────────────────────────────────────────────────────────────
 
 async function main() {
@@ -644,8 +1020,108 @@ async function main() {
       console.log(`    ${o.url}`);
     }
   }
-  console.log(`\nOutput: ${OUTPUT_DIR}`);
-  console.log(JSON.stringify(index));
+
+  // ── Skill Application ──────────────────────────────────────────────
+  console.log(`\n${"=".repeat(60)}`);
+  console.log(`  SKILL ANALYSIS`);
+  console.log(`${"=".repeat(60)}`);
+
+  // 7 - Churn Signal Extraction
+  console.log(`\n[7/15] Extracting churn signals...`);
+  const churnSignals = extractChurnSignals(posts);
+  console.log(`  Found ${churnSignals.length} churn signals`);
+  const churnPath = join(OUTPUT_DIR, "churn_signals.json");
+  writeFileSync(churnPath, JSON.stringify(churnSignals, null, 2));
+
+  // 8 - Competitor Matrix
+  console.log(`\n[8/15] Building competitor matrix...`);
+  const competitors = buildCompetitorMatrix(posts);
+  console.log(`  Found ${competitors.length} competitor patterns`);
+  const compPath = join(OUTPUT_DIR, "competitor_matrix.json");
+  writeFileSync(compPath, JSON.stringify(competitors, null, 2));
+
+  // 9 - Persona Detection
+  console.log(`\n[9/15] Detecting user personas...`);
+  const personas = detectPersonas(posts);
+  console.log(`  Persona breakdown:`);
+  for (const [p, data] of Object.entries(personas)) {
+    if (data.count > 0) console.log(`    ${p.padEnd(20)} ${data.count} mentions`);
+  }
+  const personaPath = join(OUTPUT_DIR, "personas.json");
+  writeFileSync(personaPath, JSON.stringify(personas, null, 2));
+
+  // 10 - Sentiment Scoring
+  console.log(`\n[10/15] Scoring sentiment...`);
+  const sentiment = scoreSentiment(posts);
+  console.log(`  Sentiment breakdown:`);
+  for (const [type, data] of Object.entries(sentiment)) {
+    if (data.count > 0) console.log(`    ${type.padEnd(20)} ${data.count} quotes`);
+  }
+  const sentimentPath = join(OUTPUT_DIR, "sentiment.json");
+  writeFileSync(sentimentPath, JSON.stringify(sentiment, null, 2));
+
+  // 11 - Feature Request Ranking
+  console.log(`\n[11/15] Ranking feature requests...`);
+  const features = rankFeatureRequests(posts);
+  console.log(`  Found ${features.length} feature requests`);
+  if (features.length > 0) {
+    console.log(`  Top requests:`);
+    for (const f of features.slice(0, 5)) {
+      console.log(`    ${f.feature} (score: ${f.score}) - ${f.frequency} mentions`);
+    }
+  }
+  const featuresPath = join(OUTPUT_DIR, "feature_requests.json");
+  writeFileSync(featuresPath, JSON.stringify(features, null, 2));
+
+  // 12 - Evidence Quality Scoring
+  console.log(`\n[12/15] Scoring evidence quality...`);
+  const evidence = scoreEvidence(posts);
+  console.log(`  Quality breakdown:`);
+  const tiers = { exceptional: 0, high: 0, moderate: 0, low: 0, minimal: 0 };
+  for (const e of evidence) tiers[e.tier]++;
+  for (const [t, c] of Object.entries(tiers)) {
+    if (c > 0) console.log(`    ${t.padEnd(20)} ${c} findings`);
+  }
+  const evidencePath = join(OUTPUT_DIR, "evidence_quality.json");
+  writeFileSync(evidencePath, JSON.stringify(evidence, null, 2));
+
+  // 13 - CSV Schema Export
+  console.log(`\n[13/15] Generating CSV schema...`);
+  const csvRows = enforceCsvSchema(posts);
+  const csvHeader = [
+    "topic","date","subreddit","post_id","post_url","post_title","post_upvotes",
+    "comment_id","comment_text","category","sentiment","persona","is_churn_signal",
+    "competitive_tool","switch_direction","quote_quality","evidence_source","extracted_date"
+  ].join(",");
+  const csvLines = [csvHeader, ...csvRows.map(r => 
+    Object.values(r).map(v => typeof v === "string" && v.includes(",") ? `"${v}"` : v).join(",")
+  )];
+  const csvPath = join(OUTPUT_DIR, "data.csv");
+  writeFileSync(csvPath, csvLines.join("\n"));
+  console.log(`  CSV exported`);
+
+  // 14 - Landing Page Copy
+  console.log(`\n[14/15] Generating landing page copy...`);
+  const copy = generateLandingCopy(posts);
+  const copyPath = join(OUTPUT_DIR, "landing_page_copy.json");
+  writeFileSync(copyPath, JSON.stringify(copy, null, 2));
+  if (copy.headlines.length > 0) {
+    console.log(`  Headlines:`);
+    for (const h of copy.headlines.slice(0, 3)) console.log(`    "${h}"`);
+  }
+
+  // 15 - Founder Summary
+  console.log(`\n[15/15] Generating founder summary...`);
+  const founder = generateFounderSummary(posts, churnSignals, competitors, personas, sentiment, features);
+  const founderPath = join(OUTPUT_DIR, "founder_summary.json");
+  writeFileSync(founderPath, JSON.stringify(founder, null, 2));
+  console.log(`  Top persona: ${founder.topPersona}`);
+  console.log(`  Action items: ${founder.actionItems.length}`);
+
+  console.log(`\n${"=".repeat(60)}`);
+  console.log(`  OUTPUT: ${OUTPUT_DIR}`);
+  console.log(`${"=".repeat(60)}`);
+  console.log(JSON.stringify({ index, churnSignals: churnSignals.length, competitors: competitors.length, personas, sentiment: Object.fromEntries(Object.entries(sentiment).map(([k,v]) => [k, v.count])), featureRequests: features.length, evidenceQuality: tiers }, null, 2));
 }
 
 main().catch(err => {
