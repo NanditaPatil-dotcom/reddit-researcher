@@ -109,7 +109,7 @@ function readJson(path) {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
   } catch (err) {
-    fail(`Could not parse ${path}: ${err.message}`);
+    return null;
   }
 }
 
