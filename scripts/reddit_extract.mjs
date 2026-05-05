@@ -10,6 +10,8 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { execSync } from "node:child_process";
+import { execSync } from "node:child_process";
 
 // ── Config ───────────────────────────────────────────────────────────
 
@@ -63,8 +65,14 @@ function getArg(name, fallback = null) {
   return fallback;
 }
 
+function hasFlag(name) {
+  return process.argv.includes(`--${name}`);
+}
+
 const TOPIC          = getArg("topic");
-const OUTPUT_DIR     = getArg("output", join(homedir(), "Desktop", "reddit-research"));
+const VERBOSE        = hasFlag("verbose");
+const NO_COMPILE     = hasFlag("no-compile");
+const OUTPUT_DIR_ARG = getArg("output");
 const SUBREDDITS_ARG = getArg("subreddits");
 const LIMIT          = parseInt(getArg("limit", "40"), 10);
 const TIME           = getArg("time", "year");
@@ -73,11 +81,39 @@ const MAX_PER_SUBREDDIT_ARG = getArg("max-per-subreddit");
 
 if (!TOPIC) {
   console.error("ERROR: --topic is required");
-  console.error('Usage: node reddit_extract.mjs --topic "your topic"');
+  console.error('Usage: node reddit_extract.mjs --topic "your topic" [options]');
+  console.error('');
+  console.error('Options:');
+  console.error('  --topic TEXT             Topic to research (required)');
+  console.error('  --output DIR             Custom output directory');
+  console.error('  --subreddits LIST        Comma-separated subreddit list');
+  console.error('  --limit NUM              Max posts to process (default: 40)');
+  console.error('  --time RANGE             Time window: week, month, year, all (default: year)');
+  console.error('  --delay MS               Delay between requests (default: 2500)');
+  console.error('  --verbose                Print detailed logging');
+  console.error('  --no-compile             Skip auto-compilation to HTML');
   process.exit(1);
 }
 
+// Generate output directory name dynamically if not specified
+function generateOutputDir(topic) {
+  const date = new Date();
+  const dateStr = date.toISOString().split('T')[0]; // YYYY-MM-DD
+  const slug = slugify(topic);
+  return join(homedir(), "Desktop", `${slug}_reddit_${dateStr}`);
+}
+
+const OUTPUT_DIR = OUTPUT_DIR_ARG || generateOutputDir(TOPIC);
+
 // ── Helpers ──────────────────────────────────────────────────────────
+
+function log(msg) {
+  console.error(msg);
+}
+
+function verbose(msg) {
+  if (VERBOSE) console.error(`  [verbose] ${msg}`);
+}
 
 function slugify(s) {
   return (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/, "");
@@ -95,6 +131,14 @@ function scorePost(title, body, commentCount, upvotes) {
   return (painCount * 3) + (oppCount * 5)
     + Math.min(commentCount / 10, 10)
     + Math.min(upvotes / 100, 10);
+}
+
+function log(msg) {
+  console.error(msg);
+}
+
+function verbose(msg) {
+  if (VERBOSE) console.error(`  [verbose] ${msg}`);
 }
 
 function sleep(ms) {
@@ -1122,6 +1166,23 @@ async function main() {
   console.log(`  OUTPUT: ${OUTPUT_DIR}`);
   console.log(`${"=".repeat(60)}`);
   console.log(JSON.stringify({ index, churnSignals: churnSignals.length, competitors: competitors.length, personas, sentiment: Object.fromEntries(Object.entries(sentiment).map(([k,v]) => [k, v.count])), featureRequests: features.length, evidenceQuality: tiers }, null, 2));
+
+  // Auto-compile to HTML report
+  if (!NO_COMPILE) {
+    console.log(`\n[16/16] Compiling HTML report...`);
+    try {
+      verbose(`Running: node scripts/compile_report.mjs "${OUTPUT_DIR}"`);
+      const scriptDir = process.cwd();
+      execSync(`node scripts/compile_report.mjs "${OUTPUT_DIR}"`, { 
+        stdio: 'inherit',
+        cwd: scriptDir
+      });
+      console.log(`✓ Report compiled successfully`);
+    } catch (err) {
+      console.warn(`⚠ Report compilation failed (but extraction succeeded). Run manually:`);
+      console.warn(`  node scripts/compile_report.mjs "${OUTPUT_DIR}"`);
+    }
+  }
 }
 
 main().catch(err => {
