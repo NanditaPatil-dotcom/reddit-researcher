@@ -39,6 +39,26 @@ Final deliverable is `index.html` (themed findings report) + `results.csv` for f
 
 ---
 
+## Available Skills
+
+### Core Analysis Skills (FREE — no API keys required)
+
+1. **churn-signal-extraction** — Extract quotes indicating churn: "I cancelled," "I switched," "dealbreaker," "not worth it." Identifies users who left or are about to leave.
+2. **competitor-matrix** — Extract "switched from/to" mentions into a comparison table showing migration patterns between tools.
+3. **persona-detection** — Cluster findings by user type: student, founder, engineer, creator, team lead, etc. Automatically identifies personas from language patterns.
+4. **sentiment-scoring** — Tag quotes as frustration, praise, confusion, urgency, workaround, churn risk. Scores sentiment intensity 1-5.
+5. **feature-request-ranking** — Score requested features by frequency, intensity, and comment agreement. Ranks by community demand.
+6. **evidence-quality-score** — Rate each finding 0-100 based on source quality: upvotes, recency, comment depth, repeated mentions.
+7. **csv-schema-enforcement** — Define exact columns so reports are easier to compare across topics. Standardized schema for dashboards.
+8. **landing-page-copy-generator** — Turn real user phrases into headline/value-prop/testimonial-style copy for landing pages.
+9. **founder-summary-mode** — Generate a terse "what to build / what to avoid / how to position" brief for founders.
+
+### Premium Skills (Require Paid APIs)
+
+10. **notion-export** — Push final report into a Notion page/database. *(Requires Notion API key - Not Free)*
+
+---
+
 ## Pipeline Overview
 
 Follow these steps in order:
@@ -49,8 +69,9 @@ Follow these steps in order:
 4. **Post Discovery** — find high-signal posts (sorted by top/hot)
 5. **Content Extraction** — scrape posts + comment threads
 6. **Theme Clustering** — group findings into pain point categories
-7. **PMF Signal Analysis** — find gaps, opportunities, competitor weaknesses
-8. **Report Generation** — HTML report + CSV
+7. **Skill Application** — apply analysis skills (churn, persona, sentiment, etc.)
+8. **PMF Signal Analysis** — find gaps, opportunities, competitor weaknesses
+9. **Report Generation** — HTML report + CSV
 
 ---
 
