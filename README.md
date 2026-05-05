@@ -47,6 +47,7 @@ npm install
 
 ```bash
 # Basic usage: research a topic
+# (automatically extracts data + compiles report)
 node scripts/reddit_extract.mjs --topic "obsidian alternative"
 
 # With options
@@ -55,13 +56,21 @@ node scripts/reddit_extract.mjs --topic "notion" \
   --limit 50 \
   --time year
 
-# Compile the report
-node scripts/compile_report.mjs ~/Desktop/obsidian-alternative_reddit_2026-05-06 --open
+# Skip auto-compilation if you want to apply skills first
+node scripts/reddit_extract.mjs --topic "obsidian" --no-compile
+
+# Then compile manually later
+node scripts/compile_report.mjs ~/Desktop/obsidian_reddit_2026-05-06 --open
 ```
 
 ### 3. View the Report
 
-Open `index.html` or use the `--open` flag to auto-launch in your browser.
+After extraction completes, `index.html` is automatically generated in the output directory. 
+Or use the `--open` flag when compiling to auto-launch in your browser:
+
+```bash
+node scripts/compile_report.mjs ~/Desktop/obsidian_reddit_2026-05-06 --open
+```
 
 ---
 
@@ -89,6 +98,8 @@ Output: raw/index.json, raw/*.md, themes/*.md
 
 ### Phase 2: Report Compilation (`compile_report.mjs`)
 
+**Runs automatically after Phase 1 completes** (unless you use `--no-compile` flag)
+
 ```
 raw/index.json + raw/*.md + themes/*.md
     ↓
@@ -99,6 +110,11 @@ Sort posts by score, themes by mention count
 Render HTML dashboard + CSV spreadsheet
     ↓
 Output: index.html, results.csv
+```
+
+**Manual compilation** (only needed if you used `--no-compile` or applied skills after extraction):
+```bash
+node scripts/compile_report.mjs ~/Desktop/{topic-slug}_reddit_{date}
 ```
 
 ---
@@ -117,10 +133,12 @@ node scripts/reddit_extract.mjs --topic "TOPIC" [OPTIONS]
 - `--topic TEXT` *(required)* — What to research (e.g., "obsidian", "notion alternative", "smallbiz accounting")
 - `--subreddits LIST` *(optional)* — Comma-separated subreddit list (defaults: auto-discover)
   - Example: `productivity,nocode,notion,apps`
-- `--limit NUMBER` *(optional)* — Max posts to process, default: 100
+- `--limit NUMBER` *(optional)* — Max posts to process, default: 40
 - `--time RANGE` *(optional)* — Time window: `week`, `month`, `year`, `all`, default: `year`
-- `--output DIR` *(optional)* — Custom output directory (defaults: `~/Desktop/{slug}_reddit_{date}/`)
-- `--verbose` *(optional)* — Print detailed logging
+- `--output DIR` *(optional)* — Custom output directory (defaults: `~/Desktop/{topic-slug}_reddit_{YYYY-MM-DD}/`)
+- `--verbose` *(optional)* — Print detailed logging during extraction
+- `--no-compile` *(optional)* — Skip automatic HTML report compilation
+- `--delay MS` *(optional)* — Delay between API requests in milliseconds, default: 2500
 - `--help, -h` — Show help message
 
 **Example:**
