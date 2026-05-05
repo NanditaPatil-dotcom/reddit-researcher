@@ -293,34 +293,44 @@ function renderHtml({ index, posts, themes, topic, generatedAt }) {
   const painItems = topPainPoints.map(item => `<li>${externalLink(item.url, item.title)}</li>`).join("");
 
   // Skill card item definitions
-  const churnItems = (index.churnSignals || []).slice(0, 5).map(c => 
+  const churnItemsList = (index.churnSignals || []).slice(0, 5).map(c => 
     `<li>${externalLink(c.postUrl, c.postTitle || "Post")}<div class="muted">${escapeHtml(c.excerpt || "")}</div></li>`).join("");
-  const competitorItems = (index.competitors || []).slice(0, 5).map(c =>
+  const churnItems = churnItemsList ? `<ul>${churnItemsList}</ul>` : "";
+  const competitorItemsList = (index.competitors || []).slice(0, 5).map(c =>
     `<li>${c.direction === "FROM" ? "← " : "→ "} <strong>${escapeHtml(c.name)}</strong> <span class="muted">(${c.count})</span></li>`).join("");
-  const sentimentItems = Object.entries(index.sentiment || {}).sort((a, b) => (Array.isArray(b[1]) ? b[1].length : Number(b[1]) || 0) - (Array.isArray(a[1]) ? a[1].length : Number(a[1]) || 0)).slice(0, 5).map(([k, v]) =>
+  const competitorItems = competitorItemsList ? `<ul>${competitorItemsList}</ul>` : "";
+  const sentimentItemsList = Object.entries(index.sentiment || {}).sort((a, b) => (Array.isArray(b[1]) ? b[1].length : Number(b[1]) || 0) - (Array.isArray(a[1]) ? a[1].length : Number(a[1]) || 0)).slice(0, 5).map(([k, v]) =>
     `<li>${escapeHtml(k)} <span class="muted">${Array.isArray(v) ? v.length + ' quotes' : (typeof v === 'number' ? v + ' quotes' : (v.count || 0) + ' quotes')}</span></li>`).join("");
-  const evidenceItems = (index.evidenceQuality || []).slice(0, 5).map(e =>
+  const sentimentItems = sentimentItemsList ? `<ul>${sentimentItemsList}</ul>` : "";
+  const evidenceItemsList = (index.evidenceQuality || []).slice(0, 5).map(e =>
     `<li>Score ${escapeHtml(String(e.score))} <span class="muted">(${e.tier})</span></li>`).join("");
-  const featureItems = (index.featureRequests || []).slice(0, 5).map(f =>
+  const evidenceItems = evidenceItemsList ? `<ul>${evidenceItemsList}</ul>` : "";
+  const featureItemsList = (index.featureRequests || []).slice(0, 5).map(f =>
     `<li>${externalLink(f.quotes?.[0]?.url || "#", f.feature)} <span class="muted">(score: ${f.score})</span></li>`).join("");
-  const copyHeadlineItems = (index.landingCopy?.headlines || []).slice(0, 3).map(h =>
+  const featureItems = featureItemsList ? `<ul>${featureItemsList}</ul>` : "";
+  const copyHeadlineItemsList = (index.landingCopy?.headlines || []).slice(0, 3).map(h =>
     `<li>"${escapeHtml(h)}"</li>`).join("");
-  const founderOpportunityItems = (index.founder?.opportunities || []).slice(0, 3).map(o =>
+  const copyHeadlineItems = copyHeadlineItemsList ? `<ul>${copyHeadlineItemsList}</ul>` : "";
+  const founderOpportunityItemsList = (index.founder?.opportunities || []).slice(0, 3).map(o =>
     `<li>${escapeHtml(o.title)}</li>`).join("");
-  const founderAntiPatternItems = (index.founder?.antiPatterns || []).slice(0, 3).map(a =>
+  const founderOpportunityItems = founderOpportunityItemsList ? `<ul>${founderOpportunityItemsList}</ul>` : "";
+  const founderAntiPatternItemsList = (index.founder?.antiPatterns || []).slice(0, 3).map(a =>
     `<li>${escapeHtml(a.title)}</li>`).join("");
-  const founderActionItems = (index.founder?.actionItems || []).slice(0, 3).map(a =>
+  const founderAntiPatternItems = founderAntiPatternItemsList ? `<ul>${founderAntiPatternItemsList}</ul>` : "";
+  const founderActionItemsList = (index.founder?.actionItems || []).slice(0, 3).map(a =>
     `<li><strong>${escapeHtml(a.priority)}:</strong> ${escapeHtml(a.action)}</li>`).join("");
+  const founderActionItems = founderActionItemsList ? `<ul>${founderActionItemsList}</ul>` : "";
 
   // Skill cards for theme grid
-  const personaEntries = Object.entries(index.personas || {}).sort((a, b) => b[1].count - a[1].count).slice(0, 5);
-  const maxPersonaCount = Math.max(1, ...personaEntries.map(item => item[1].count));
+  const personaEntries = Object.entries(index.personas || {}).sort((a, b) => b[1].count - a[1].count);
+  const personaItemsList = personaEntries.map(([k, v]) =>
+    `<li>${escapeHtml(k)} <span class="muted">(${v.count} mentions)</span></li>`).join("");
+  const personaItems = personaItemsList ? `<ul>${personaItemsList}</ul>` : "";
   const skillCards = [
-    ...personaEntries.map(([k, v]) =>
-      `<article class="theme-card">
-        <div class="theme-head"><div><h2>${escapeHtml(k)}</h2><p>${v.count} mentions</p></div></div>
-        <div class="bar"><span style="width:${Math.min(100, (v.count / maxPersonaCount) * 100)}%"></span></div>
-      </article>`),
+    personaItems && `<article class="theme-card">
+      <div class="theme-head"><div><h2>User Personas</h2><p>${personaEntries.length} personas</p></div></div>
+      <div class="mentions">${personaItems}</div>
+    </article>`,
     (index.churnSignals || []).length > 0 && `<article class="theme-card">
       <div class="theme-head"><div><h2>Churn Signals</h2><p>${churnItems.split('</li>').length - 1} items</p></div></div>
       <div class="mentions">${churnItems}</div>
@@ -399,7 +409,10 @@ function renderHtml({ index, posts, themes, topic, generatedAt }) {
   .score { color: var(--ink); background: var(--panel-soft); border-color: var(--line); }
   .bar { height: 6px; background: #242424; border-radius: 0; overflow: hidden; margin: 14px 0; }
   .bar span { display: block; height: 100%; background: var(--black); border-radius: 0; min-width: 4px; }
-  .mentions { display: grid; gap: 10px; }
+  .mentions { display: block; }
+  .mentions ul { list-style: none; padding: 0; margin: 0; }
+  .mentions li { padding: 9px 0; border-top: 1px solid var(--line); font-size: 0.88rem; }
+  .mentions li:first-child { border-top: 0; }
   .mention { padding-left: 12px; border-left: 1px solid var(--line); }
   .mention-title { display: block; font-size: 0.86rem; font-weight: 650; line-height: 1.35; }
   .mention-keywords { margin-top: 4px; color: var(--muted); font-size: 0.76rem; }
