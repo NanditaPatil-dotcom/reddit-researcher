@@ -39,6 +39,11 @@ const DEFAULT_SUBREDDITS = [
   "selfhosted", "nocode", "pkms"
 ];
 
+const GENERIC_TOPIC_WORDS = new Set([
+  "alternative", "alternatives", "app", "apps", "tool", "tools",
+  "software", "platform", "product", "review", "reviews"
+]);
+
 const THEME_KEYWORDS = {
   PRICING:         ["expensive", "price", "pricing", "cost", "cheap", "afford", "subscription", "free tier", "paid", "cancelled", "cancel"],
   PERFORMANCE:     ["slow", "lag", "laggy", "crash", "crashes", "freeze", "hang", "speed", "performance"],
@@ -92,6 +97,45 @@ function scorePost(title, body, commentCount, upvotes) {
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
+}
+
+function normalizeSearchText(text) {
+  return (text || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function getTopicKeys(topic) {
+  const words = (topic || "")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .filter(word => !GENERIC_TOPIC_WORDS.has(word));
+  const fallbackWords = (topic || "").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const meaningfulWords = words.length > 0 ? words : fallbackWords;
+
+  return {
+    compact: meaningfulWords.join(""),
+    primary: meaningfulWords.find(word => word.length >= 3) || meaningfulWords[0] || "",
+  };
+}
+
+function scoreSubredditCandidate(candidate, topicKeys) {
+  const name = normalizeSearchText(candidate.displayName);
+  const title = normalizeSearchText(candidate.title);
+  const description = normalizeSearchText(candidate.description);
+  const { compact, primary } = topicKeys;
+
+  let score = 0;
+  if (compact && name === compact) score += 120;
+  if (primary && name === primary) score += 100;
+  if (compact && name.includes(compact)) score += 90;
+  if (primary && name.includes(primary)) score += 80;
+  if (compact && title.includes(compact)) score += 35;
+  if (primary && title.includes(primary)) score += 25;
+  if (compact && description.includes(compact)) score += 15;
+  if (primary && description.includes(primary)) score += 10;
+  score += Math.min(Math.log10(Math.max(candidate.subscribers, 1)), 6);
+
+  return score;
 }
 
 // ── Reddit JSON API — pure fetch, zero dependencies ──────────────────
@@ -163,34 +207,59 @@ async function getComments(permalink) {
 async function discoverSubredditsFromReddit(topic) {
   const url  = `https://www.reddit.com/subreddits/search.json?q=${encodeURIComponent(topic)}&limit=10`;
   const data = await fetchReddit(url);
-  const found = new Set();
+  const found = new Map();
+  const topicKeys = getTopicKeys(topic);
+
   if (data?.data?.children) {
     for (const c of data.data.children) {
-      const sub = c.data?.display_name?.toLowerCase();
-      if (sub && !["all", "popular"].includes(sub)) found.add(sub);
+      const displayName = c.data?.display_name?.toLowerCase();
+      if (!displayName || ["all", "popular"].includes(displayName)) continue;
+
+      const candidate = {
+        displayName,
+        title: c.data?.title || "",
+        description: c.data?.public_description || "",
+        subscribers: Number(c.data?.subscribers || 0),
+      };
+      const score = scoreSubredditCandidate(candidate, topicKeys);
+      if (score < 50) continue;
+
+      const previous = found.get(displayName);
+      if (!previous || score > previous.score) found.set(displayName, { ...candidate, score });
     }
   }
-  return [...found];
+
+  return [...found.values()]
+    .sort((a, b) => b.score - a.score || b.subscribers - a.subscribers)
+    .map(candidate => candidate.displayName);
 }
 
 // ── Step 1: Subreddit Discovery ──────────────────────────────────────
 
 async function discoverSubreddits(topic) {
   if (SUBREDDITS_ARG) {
-    const manual = SUBREDDITS_ARG.split(",").map(s => s.trim().replace(/^r\//, ""));
+    const manual = SUBREDDITS_ARG
+      .split(",")
+      .map(s => s.trim().replace(/^r\//, "").toLowerCase())
+      .filter(Boolean);
     console.log(`Using provided subreddits: ${manual.join(", ")}`);
     return manual;
   }
 
   console.log(`\n[1/6] Discovering subreddits for "${topic}"...`);
 
-  // Use Reddit's own subreddit search
   const fromReddit = await discoverSubredditsFromReddit(topic);
 
-  // Merge with sensible defaults
-  const merged = [...new Set([...fromReddit, ...DEFAULT_SUBREDDITS])].slice(0, 5);
-  console.log(`Found subreddits: ${merged.join(", ")}`);
-  return merged;
+  if (fromReddit.length > 0) {
+    const discovered = fromReddit.slice(0, 5);
+    console.log(`Found subreddits from Reddit: ${discovered.join(", ")}`);
+    return discovered;
+  }
+
+  console.warn(`No topic-specific subreddits found for "${topic}". Falling back to generic defaults.`);
+  const defaults = DEFAULT_SUBREDDITS.slice(0, 5);
+  console.log(`Fallback subreddits: ${defaults.join(", ")}`);
+  return defaults;
 }
 
 // ── Step 2: Post Discovery ───────────────────────────────────────────
