@@ -68,6 +68,8 @@ const OUTPUT_DIR     = getArg("output", join(homedir(), "Desktop", "reddit-resea
 const SUBREDDITS_ARG = getArg("subreddits");
 const LIMIT          = parseInt(getArg("limit", "40"), 10);
 const TIME           = getArg("time", "year");
+const REQUEST_DELAY  = parseInt(getArg("delay", "2500"), 10);
+const MAX_PER_SUBREDDIT_ARG = getArg("max-per-subreddit");
 
 if (!TOPIC) {
   console.error("ERROR: --topic is required");
@@ -97,6 +99,14 @@ function scorePost(title, body, commentCount, upvotes) {
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
+}
+
+function createRedditUrl(host, pathname, params = {}) {
+  const url = new URL(pathname, host);
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, String(value));
+  }
+  return url.toString();
 }
 
 function normalizeSearchText(text) {
@@ -138,27 +148,129 @@ function scoreSubredditCandidate(candidate, topicKeys) {
   return score;
 }
 
+function buildSearchQueries(topic) {
+  const cleanedTopic = (topic || "").trim().toLowerCase();
+  const words = cleanedTopic.split(/[^a-z0-9]+/).filter(word => word.length >= 3);
+  const queries = new Set([cleanedTopic]);
+
+  if (words.length > 1) {
+    queries.add(words.join(" "));
+    queries.add(words[0]);
+    queries.add(`${words[0]} app`);
+    queries.add(`${words[0]} tracking`);
+  }
+
+  for (const modifier of DEFAULT_SEARCH_MODIFIERS.slice(0, 3)) {
+    queries.add(`${cleanedTopic} ${modifier}`);
+  }
+
+  return [...queries].filter(Boolean).slice(0, 7);
+}
+
+function allocatePostBudgets(candidatesBySubreddit, subreddits, totalLimit) {
+  const available = subreddits
+    .map(subreddit => ({
+      subreddit,
+      count: candidatesBySubreddit.get(subreddit)?.length || 0,
+    }))
+    .filter(item => item.count > 0);
+
+  if (available.length === 0) return new Map();
+
+  if (MAX_PER_SUBREDDIT_ARG) {
+    const maxPerSubreddit = parseInt(MAX_PER_SUBREDDIT_ARG, 10);
+    return new Map(available.map(item => [
+      item.subreddit,
+      Math.min(item.count, maxPerSubreddit),
+    ]));
+  }
+
+  const budgets = new Map(available.map(item => [item.subreddit, 0]));
+  let remaining = totalLimit;
+
+  if (totalLimit >= available.length) {
+    for (const item of available) {
+      budgets.set(item.subreddit, 1);
+      remaining--;
+    }
+  }
+
+  const extraCapacity = available.reduce((sum, item) => {
+    return sum + Math.max(item.count - budgets.get(item.subreddit), 0);
+  }, 0);
+
+  if (remaining <= 0 || extraCapacity === 0) return budgets;
+
+  const fractionalShares = available.map(item => {
+    const current = budgets.get(item.subreddit);
+    const capacity = Math.max(item.count - current, 0);
+    const exactShare = remaining * (capacity / extraCapacity);
+    const wholeShare = Math.floor(exactShare);
+
+    budgets.set(item.subreddit, current + wholeShare);
+
+    return {
+      subreddit: item.subreddit,
+      remainder: exactShare - wholeShare,
+      capacity,
+    };
+  });
+
+  remaining = totalLimit - [...budgets.values()].reduce((sum, count) => sum + count, 0);
+  fractionalShares
+    .sort((a, b) => b.remainder - a.remainder || b.capacity - a.capacity)
+    .forEach(item => {
+      if (remaining <= 0) return;
+      const current = budgets.get(item.subreddit);
+      const count = candidatesBySubreddit.get(item.subreddit)?.length || 0;
+      if (current >= count) return;
+      budgets.set(item.subreddit, current + 1);
+      remaining--;
+    });
+
+  return budgets;
+}
+
 // ── Reddit JSON API — pure fetch, zero dependencies ──────────────────
 
-async function fetchReddit(url) {
+async function fetchReddit(url, attempt = 1) {
   try {
-    await sleep(500); // be polite to Reddit's servers
+    await sleep(REQUEST_DELAY); // be polite to Reddit's servers
     const res = await fetch(url, {
       headers: {
         "User-Agent": "reddit-researcher-bot/1.0 (local research tool)",
         "Accept":     "application/json",
       },
     });
-    if (!res.ok) return null;
+
+    if (res.status === 429 && attempt === 1) {
+      const resetSeconds = Number(res.headers.get("x-ratelimit-reset") || 30);
+      const waitSeconds = Math.max(5, Math.min(resetSeconds + 1, 90));
+      console.warn(`  Reddit rate limit hit. Waiting ${waitSeconds}s before retrying...`);
+      await sleep(waitSeconds * 1000);
+      return fetchReddit(url, attempt + 1);
+    }
+
+    if (!res.ok) {
+      console.warn(`  Reddit request failed (${res.status}) for ${url}`);
+      return null;
+    }
+
     return await res.json();
-  } catch {
+  } catch (err) {
+    console.warn(`  Reddit request failed: ${err.message}`);
     return null;
   }
 }
 
 async function searchSubreddit(subreddit, query, time, limit = 15) {
-  const url  = `https://www.reddit.com/r/${subreddit}/search.json`
-             + `?q=${encodeURIComponent(query)}&sort=top&t=${time}&limit=${limit}&restrict_sr=1`;
+  const url = createRedditUrl("https://www.reddit.com", `/r/${subreddit}/search.json`, {
+    q: query,
+    sort: "relevance",
+    t: time,
+    limit,
+    restrict_sr: 1,
+  });
   const data = await fetchReddit(url);
   if (!data?.data?.children) return [];
   return data.data.children
@@ -175,7 +287,10 @@ async function searchSubreddit(subreddit, query, time, limit = 15) {
 }
 
 async function getTopPosts(subreddit, time, limit = 10) {
-  const url  = `https://www.reddit.com/r/${subreddit}/top.json?t=${time}&limit=${limit}`;
+  const url = createRedditUrl("https://www.reddit.com", `/r/${subreddit}/top.json`, {
+    t: time,
+    limit,
+  });
   const data = await fetchReddit(url);
   if (!data?.data?.children) return [];
   return data.data.children
@@ -192,7 +307,10 @@ async function getTopPosts(subreddit, time, limit = 10) {
 }
 
 async function getComments(permalink) {
-  const url  = `https://www.reddit.com${permalink}.json?limit=50&sort=top`;
+  const url = createRedditUrl("https://www.reddit.com", `${permalink}.json`, {
+    limit: 50,
+    sort: "top",
+  });
   const data = await fetchReddit(url);
   if (!Array.isArray(data) || !data[1]) return [];
   return (data[1].data.children || [])
@@ -205,7 +323,10 @@ async function getComments(permalink) {
 }
 
 async function discoverSubredditsFromReddit(topic) {
-  const url  = `https://www.reddit.com/subreddits/search.json?q=${encodeURIComponent(topic)}&limit=10`;
+  const url = createRedditUrl("https://www.reddit.com", "/subreddits/search.json", {
+    q: topic,
+    limit: 10,
+  });
   const data = await fetchReddit(url);
   const found = new Map();
   const topicKeys = getTopicKeys(topic);
@@ -267,37 +388,59 @@ async function discoverSubreddits(topic) {
 async function discoverPosts(subreddits, topic) {
   console.log(`\n[2/6] Discovering posts across ${subreddits.length} subreddits...`);
 
-  const allPosts = [];
-  const seen     = new Set();
+  const candidatesBySubreddit = new Map(subreddits.map(sub => [sub, []]));
+  const seen = new Set();
 
-  function addPost(post) {
+  function addCandidate(post) {
     const key = post.url.split("?")[0];
-    if (seen.has(key)) return;
+    if (seen.has(key)) return false;
     seen.add(key);
-    allPosts.push({ ...post, url: key });
+    const subreddit = (post.subreddit || "").toLowerCase();
+    if (!candidatesBySubreddit.has(subreddit)) candidatesBySubreddit.set(subreddit, []);
+    candidatesBySubreddit.get(subreddit).push({ ...post, url: key });
+    return true;
+  }
+
+  if (MAX_PER_SUBREDDIT_ARG) {
+    console.log(`  Max per subreddit: ${MAX_PER_SUBREDDIT_ARG} posts`);
+  } else {
+    console.log(`  Allocation: proportional to candidates found per subreddit`);
   }
 
   for (const sub of subreddits) {
     console.log(`  Searching r/${sub}...`);
+    let candidateCount = 0;
 
-    // Direct topic search
-    const direct = await searchSubreddit(sub, topic, TIME, 15);
-    for (const r of direct) addPost(r);
-
-    // Pain-point modifier searches
-    for (const modifier of DEFAULT_SEARCH_MODIFIERS.slice(0, 3)) {
-      const results = await searchSubreddit(sub, `${topic} ${modifier}`, TIME, 8);
-      for (const r of results) addPost(r);
+    for (const query of buildSearchQueries(topic)) {
+      const results = await searchSubreddit(sub, query, TIME, 10);
+      for (const r of results) {
+        if (addCandidate(r)) candidateCount++;
+      }
     }
 
-    // Top posts that mention the topic
     const top = await getTopPosts(sub, TIME, 10);
+    const topicWords = topic.toLowerCase().split(/[^a-z0-9]+/).filter(word => word.length >= 3);
     for (const r of top) {
-      const firstWord = topic.toLowerCase().split(" ")[0];
-      if (r.title.toLowerCase().includes(firstWord)) addPost(r);
+      const title = r.title.toLowerCase();
+      if (topicWords.some(word => title.includes(word)) && addCandidate(r)) candidateCount++;
     }
 
-    console.log(`    r/${sub}: ${allPosts.length} posts so far`);
+    console.log(`    r/${sub}: ${candidateCount} candidates`);
+  }
+
+  const budgets = allocatePostBudgets(candidatesBySubreddit, subreddits, LIMIT);
+  const allPosts = [];
+
+  for (const sub of subreddits) {
+    const budget = budgets.get(sub) || 0;
+    const posts = candidatesBySubreddit.get(sub) || [];
+    const selected = posts
+      .sort((a, b) => scorePost(b.title, b.selftext, b.commentCount, b.upvotes)
+        - scorePost(a.title, a.selftext, a.commentCount, a.upvotes))
+      .slice(0, budget);
+
+    allPosts.push(...selected);
+    if (posts.length > 0) console.log(`    r/${sub}: selected ${selected.length}/${posts.length}`);
   }
 
   console.log(`  Total unique posts: ${allPosts.length}`);
