@@ -572,10 +572,11 @@ function writeIndexJson(posts, themes, subreddits, outputDir) {
     totalFlaggedComments: posts.filter(Boolean).reduce((s, p) => s + p.comments.length, 0),
     themeBreakdown:       Object.fromEntries(Object.entries(themes).map(([k, v]) => [k, v.length])),
     topOpportunities:     themes.OPPORTUNITY.slice(0, 5).map(p => ({ title: p.title, url: p.url, score: p.score })),
-    topPainPoints:        [...themes.PRICING, ...themes.MISSING_FEATURE]
-                            .sort((a, b) => b.score - a.score)
-                            .slice(0, 10)
-                            .map(p => ({ title: p.title, url: p.url })),
+    topPainPoints:        [...new Map(
+                            [...themes.PRICING, ...themes.MISSING_FEATURE]
+                              .sort((a, b) => b.score - a.score)
+                              .map(p => [p.url, { title: p.title, url: p.url }])
+                          ).values()].slice(0, 10),
     generatedAt: new Date().toISOString(),
   };
   writeFileSync(join(outputDir, "raw", "index.json"), JSON.stringify(index, null, 2));
