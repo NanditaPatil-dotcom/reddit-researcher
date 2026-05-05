@@ -54,6 +54,32 @@ const themes = readThemes(themesDir);
 const generatedAt = index.generatedAt ? new Date(index.generatedAt) : new Date();
 const topic = index.topic || titleFromDir(researchDir);
 
+// Read skill output files
+try {
+  index.churnSignals = readJson(join(researchDir, "churn_signals.json"));
+} catch { index.churnSignals = null; }
+try {
+  index.competitors = readJson(join(researchDir, "competitor_matrix.json"));
+} catch { index.competitors = null; }
+try {
+  index.personas = readJson(join(researchDir, "personas.json"));
+} catch { index.personas = null; }
+try {
+  index.sentiment = readJson(join(researchDir, "sentiment.json"));
+} catch { index.sentiment = null; }
+try {
+  index.featureRequests = readJson(join(researchDir, "feature_requests.json"));
+} catch { index.featureRequests = null; }
+try {
+  index.evidenceQuality = readJson(join(researchDir, "evidence_quality.json"));
+} catch { index.evidenceQuality = null; }
+try {
+  index.landingCopy = readJson(join(researchDir, "landing_page_copy.json"));
+} catch { index.landingCopy = null; }
+try {
+  index.founder = readJson(join(researchDir, "founder_summary.json"));
+} catch { index.founder = null; }
+
 themes.sort((a, b) => b.mentionCount - a.mentionCount || a.theme.localeCompare(b.theme));
 posts.sort((a, b) => b.score - a.score || b.upvotes - a.upvotes);
 
@@ -265,6 +291,28 @@ function renderHtml({ index, posts, themes, topic, generatedAt }) {
 
   const opportunityItems = topOpportunities.map(item => `<li>${externalLink(item.url, item.title)}${item.score ? `<span>${escapeHtml(Number(item.score).toFixed(1))}</span>` : ""}</li>`).join("");
   const painItems = topPainPoints.map(item => `<li>${externalLink(item.url, item.title)}</li>`).join("");
+
+  // Skill panel items
+  const churnItems = (index.churnSignals || []).slice(0, 5).map(c => 
+    `<li>${externalLink(c.postUrl, c.postTitle || "Post")}<div class="muted">${escapeHtml(c.excerpt || "")}</div></li>`).join("");
+  const competitorItems = (index.competitors || []).slice(0, 5).map(c =>
+    `<li>${c.direction === "FROM" ? "← " : "→ "} <strong>${escapeHtml(c.name)}</strong> <span class="muted">(${c.count})</span></li>`).join("");
+  const personaItems = Object.entries(index.personas || {}).sort((a, b) => b[1].count - a[1].count).slice(0, 5).map(([k, v]) =>
+    `<li>${escapeHtml(k)} <span class="muted">${v.count} mentions</span></li>`).join("");
+  const sentimentItems = Object.entries(index.sentiment || {}).sort((a, b) => (Array.isArray(b[1]) ? b[1].length : Number(b[1]) || 0) - (Array.isArray(a[1]) ? a[1].length : Number(a[1]) || 0)).slice(0, 5).map(([k, v]) =>
+    `<li>${escapeHtml(k)} <span class="muted">${Array.isArray(v) ? v.length + ' quotes' : (typeof v === 'number' ? v + ' quotes' : (v.count || 0) + ' quotes')}</span></li>`).join("");
+  const evidenceItems = (index.evidenceQuality || []).slice(0, 5).map(e =>
+    `<li>Score ${escapeHtml(String(e.score))} <span class="muted">(${e.tier})</span></li>`).join("");
+  const featureItems = (index.featureRequests || []).slice(0, 5).map(f =>
+    `<li>${externalLink(f.quotes?.[0]?.url || "#", f.feature)} <span class="muted">(score: ${f.score})</span></li>`).join("");
+  const copyHeadlineItems = (index.landingCopy?.headlines || []).slice(0, 3).map(h =>
+    `<li>"${escapeHtml(h)}"</li>`).join("");
+  const founderOpportunityItems = (index.founder?.opportunities || []).slice(0, 3).map(o =>
+    `<li>${escapeHtml(o.title)}</li>`).join("");
+  const founderAntiPatternItems = (index.founder?.antiPatterns || []).slice(0, 3).map(a =>
+    `<li>${escapeHtml(a.title)}</li>`).join("");
+  const founderActionItems = (index.founder?.actionItems || []).slice(0, 3).map(a =>
+    `<li><strong>${escapeHtml(a.priority)}:</strong> ${escapeHtml(a.action)}</li>`).join("");
   const subredditPills = subreddits.map(sub => `<span>r/${escapeHtml(sub)}</span>`).join("");
 
   return `<!DOCTYPE html>
@@ -364,6 +412,16 @@ function renderHtml({ index, posts, themes, topic, generatedAt }) {
       <aside>
         ${opportunityItems ? `<section class="panel"><h2>Top Opportunities</h2><ul class="signal-list">${opportunityItems}</ul></section>` : ""}
         ${painItems ? `<section class="panel"><h2>Top Pain Points</h2><ul class="signal-list">${painItems}</ul></section>` : ""}
+        ${founderOpportunityItems ? `<section class="panel"><h2>What to Build</h2><ul class="signal-list">${founderOpportunityItems}</ul></section>` : ""}
+        ${founderAntiPatternItems ? `<section class="panel"><h2>What to Avoid</h2><ul class="signal-list">${founderAntiPatternItems}</ul></section>` : ""}
+        ${founderActionItems ? `<section class="panel"><h2>Action Items</h2><ul class="signal-list">${founderActionItems}</ul></section>` : ""}
+        ${personaItems ? `<section class="panel"><h2>User Personas</h2><ul class="signal-list">${personaItems}</ul></section>` : ""}
+        ${churnItems ? `<section class="panel"><h2>Churn Signals</h2><ul class="signal-list">${churnItems}</ul></section>` : ""}
+        ${competitorItems ? `<section class="panel"><h2>Competitor Switches</h2><ul class="signal-list">${competitorItems}</ul></section>` : ""}
+        ${sentimentItems ? `<section class="panel"><h2>Sentiment Breakdown</h2><ul class="signal-list">${sentimentItems}</ul></section>` : ""}
+        ${evidenceItems ? `<section class="panel"><h2>Evidence Quality</h2><ul class="signal-list">${evidenceItems}</ul></section>` : ""}
+        ${featureItems ? `<section class="panel"><h2>Feature Requests</h2><ul class="signal-list">${featureItems}</ul></section>` : ""}
+        ${copyHeadlineItems ? `<section class="panel"><h2>Landing Copy Headlines</h2><ul class="signal-list">${copyHeadlineItems}</ul></section>` : ""}
         <section class="panel">
           <h2>Source Files</h2>
           <p class="meta">Inputs: <code>raw/index.json</code>, <code>raw/*.md</code>, <code>themes/*.md</code><br>Spreadsheet: <code>results.csv</code></p>
@@ -435,6 +493,16 @@ function renderCsv({ themes, posts }) {
   }
 
   return rows.map(row => row.map(csvEscape).join(",")).join("\n") + "\n";
+}
+
+function renderSkillPanel({ id, title, items, renderItem, buttonLabel, buttonUrl }) {
+  if (!items || items.length === 0) return "";
+  const itemHtml = items.slice(0, 5).map(renderItem).join("");
+  const moreLink = buttonUrl ? `<a href="${escapeHtml(buttonUrl)}" class="signal-list li-link">${buttonLabel}</a>` : "";
+  return `<section class="panel">
+    <h2>${escapeHtml(title)}</h2>
+    <ul class="signal-list">${itemHtml}${moreLink}</ul>
+  </section>`;
 }
 
 function csvEscape(value) {
