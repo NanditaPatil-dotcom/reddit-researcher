@@ -1,4 +1,4 @@
-# Browser Skills
+# Browser Skills and App intergration
 
 A collection of AI agent skills powered by browser automation and app integrations. Each skill is a self-contained module that uses the `browse` CLI or a lightweight "connect" plugin to accomplish research, data-extraction, and workflow automation tasks.
 
@@ -90,7 +90,6 @@ Best for: writing back to apps, sending emails, creating issues, updating CRMs, 
 
 ### Browser Skill (Reddit Research)
 ```bash
-# No API keys needed
 node skills/reddit-researcher/scripts/reddit_extract.mjs --topic "notion alternative"
 node skills/reddit-researcher/scripts/compile_report.mjs ~/Desktop/reddit-research --open
 ```
