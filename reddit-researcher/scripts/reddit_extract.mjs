@@ -1166,22 +1166,22 @@ async function main() {
   console.log(`${"=".repeat(60)}`);
   console.log(JSON.stringify({ index, churnSignals: churnSignals.length, competitors: competitors.length, personas, sentiment: Object.fromEntries(Object.entries(sentiment).map(([k,v]) => [k, v.count])), featureRequests: features.length, evidenceQuality: tiers }, null, 2));
 
-  // Auto-compile to HTML report
-  if (!NO_COMPILE) {
-    console.log(`\n[16/16] Compiling HTML report...`);
-    try {
-      verbose(`Running: node scripts/compile_report.mjs "${OUTPUT_DIR}"`);
-      const scriptDir = process.cwd();
-      execSync(`node scripts/compile_report.mjs "${OUTPUT_DIR}"`, { 
-        stdio: 'inherit',
-        cwd: scriptDir
-      });
-      console.log(`✓ Report compiled successfully`);
-    } catch (err) {
-      console.warn(`⚠ Report compilation failed (but extraction succeeded). Run manually:`);
-      console.warn(`  node scripts/compile_report.mjs "${OUTPUT_DIR}"`);
-    }
-  }
+   // Auto-compile to HTML report
+   if (!NO_COMPILE) {
+     console.log(`\n[16/16] Compiling HTML report...`);
+     try {
+       const scriptDir = new URL('.', import.meta.url).pathname;
+       verbose(`Running: node compile_report.mjs "${OUTPUT_DIR}"`);
+       execSync(`node compile_report.mjs "${OUTPUT_DIR}"`, { 
+         stdio: 'inherit',
+         cwd: scriptDir
+       });
+       console.log(`✓ Report compiled successfully`);
+     } catch (err) {
+       console.warn(`⚠ Report compilation failed (but extraction succeeded). Run manually:`);
+       console.warn(`  node scripts/compile_report.mjs "${OUTPUT_DIR}"`);
+     }
+   }
 }
 
 main().catch(err => {
