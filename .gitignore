@@ -36,3 +36,20 @@ temp/
 # Project specific
 .cache/
 coverage/
+
+# reddit-researcher / script outputs
+# Ignore common output artifacts and local report folders created by scripts
+**/raw/
+**/themes/
+churn_signals.json
+competitor_matrix.json
+personas.json
+sentiment.json
+feature_requests.json
+evidence_quality.json
+data.csv
+landing_page_copy.json
+founder_summary.json
+subreddits.txt
+index.json
+*_reddit_*/
