@@ -53,9 +53,9 @@ Skills are modular and composable — use one standalone or chain multiple toget
 ### App Integrations
 | Skill | Description |
 |-------|-------------|
-| [crm-sync](skills/composio-crm-sync/) | Sync research findings directly into HubSpot or Pipedrive |
-| [github-agent](skills/composio-github-agent/) | Create issues, PRs, and comments on GitHub from agent findings |
-| [outreach-agent](skills/composio-outreach-agent/) | Draft and send personalized outreach via Gmail or Slack |
+| [crm-sync](skills/crm-sync/) | Sync research findings directly into HubSpot or Pipedrive |
+| [github-agent](skills/github-agent/) | Create issues, PRs, and comments on GitHub from agent findings |
+| [outreach-agent](skills/outreach-agent/) | Draft and send personalized outreach via Gmail or Slack |
 
 ---
 
@@ -94,13 +94,14 @@ node skills/reddit-researcher/scripts/reddit_extract.mjs --topic "notion alterna
 node skills/reddit-researcher/scripts/compile_report.mjs ~/Desktop/reddit-research --open
 ```
 
-### Composio Skill (CRM Sync)
+### Connector Skill (CRM Sync)
 ```bash
-pip install composio-core composio-claude
-composio login
-composio add hubspot
+# Example: install a connector runtime or plugin to enable connector-backed skills
+pip install connector-runtime connector-claude
+connector login
+connector add hubspot
 
-# Then ask Claude to run the composio-crm-sync skill
+# Then ask Claude to run the crm-sync skill
 ```
 
 ---
