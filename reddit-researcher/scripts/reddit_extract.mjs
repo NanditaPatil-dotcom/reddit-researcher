@@ -11,7 +11,6 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
-import { execSync } from "node:child_process";
 
 // ── Config ───────────────────────────────────────────────────────────
 
