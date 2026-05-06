@@ -1,20 +1,20 @@
 {
-  "name": "reddit-researcher",
+  "name": "automation-browser-skills",
   "version": "1.0.0",
-  "description": "",
+  "description": "AI agent skills powered by browser automation and app integrations",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/NanditaPatil-dotcom/reddit-researcher.git"
+    "url": "git+https://github.com/NanditaPatil-dotcom/automation-browser-skills.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/NanditaPatil-dotcom/reddit-researcher/issues"
+    "url": "https://github.com/NanditaPatil-dotcom/automation-browser-skills/issues"
   },
-  "homepage": "https://github.com/NanditaPatil-dotcom/reddit-researcher#readme"
+  "homepage": "https://github.com/NanditaPatil-dotcom/automation-browser-skills#readme"
 }
